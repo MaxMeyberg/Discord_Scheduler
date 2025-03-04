@@ -1,3 +1,109 @@
+# Schedge - Discord Calendar Bot
+
+Schedge is a Discord bot that integrates with Google Calendar through Cronofy to help users manage and share their schedules.
+
+## Features
+
+- Connect your Google Calendar to Discord
+- View your calendar in text or ASCII art format
+- Find common free times between multiple users
+- Admin tools for user management
+
+## Prerequisites
+
+- Python 3.8+
+- Discord Bot Token
+- Mistral API Key
+- Cronofy API credentials
+
+## Installation
+
+1. Clone this repository:
+```
+git clone https://github.com/yourusername/schedge.git
+cd schedge
+```
+
+2. Install required packages:
+```
+pip install -r requirements.txt
+```
+
+3. Create a `.env` file with the following:
+```
+DISCORD_TOKEN=your_discord_token
+MISTRAL_API_KEY=your_mistral_api_key
+CRONOFY_CLIENT_ID=your_cronofy_client_id
+CRONOFY_CLIENT_SECRET=your_cronofy_client_secret
+CRONOFY_REDIRECT_URI=https://oauth.pstmn.io/v1/callback
+```
+
+## Dependencies
+
+- discord.py
+- python-dotenv
+- aiosqlite
+- aiohttp
+- pytz (for timezone handling)
+- mistralai (official Mistral AI client)
+
+## Bot Commands
+
+### User Commands
+- `!register` - Connect your Google Calendar to Schedge
+- `!unregister` - Remove your calendar connection
+- `!asciical` - Display your calendar in ASCII art format
+- `!simplecal` - Show your calendar in simple text format
+- `!find_times @user1 @user2 ...` - Find common free times between mentioned users
+- `!help` - Show available commands
+
+### Admin Commands
+- `!users` - Show all registered users (admin only)
+- `!viewcal [username]` - View a specific user's calendar (admin only)
+
+## Admin Configuration
+
+Admins are defined in the `ADMIN_USERS` list in the `bot.py` file:
+
+```python
+ADMIN_USERS = [
+    "username1",  # Your Discord username
+    "username2"   # Another admin's username
+]
+```
+
+## Database
+
+The bot uses SQLite to store user data:
+- User Discord IDs and usernames
+- OAuth tokens and calendar connection details
+- Registration timestamps
+
+## Setup for Development
+
+1. Create a Discord bot in the [Discord Developer Portal](https://discord.com/developers/applications)
+2. Enable necessary intents (Presence, Server Members, Message Content)
+3. Set up a Cronofy account and create an OAuth application
+4. Add the bot to your Discord server with appropriate permissions
+
+## Running the Bot
+
+```
+python bot.py
+```
+
+## Resetting the Database
+
+If you need to reset the database:
+
+```
+python reset_db.py
+```
+
+## License
+
+[MIT License](LICENSE)
+
 # CS 153 - Infrastructure at Scale AI Agent Starter Code
 
 Note that for Discord the terms Bot and App are interchangable. We will use App in this manual.
@@ -62,7 +168,7 @@ How to create or join your group channel:
 
 If the Channel Already Exists:
 
-- Check if you already have the role for this group. If you don’t have the role, it will assign you the role corresponding to `<Group Name>` granting you access to the channel.
+- Check if you already have the role for this group. If you don't have the role, it will assign you the role corresponding to `<Group Name>` granting you access to the channel.
 
 If the Channel Does Not Exist:
 
@@ -82,28 +188,28 @@ If the Channel Does Not Exist:
 
 1. Fork and clone this GitHub repository.
 2. Share the repo with your teammates.
-3. Create a file called `.env` the same directory/folder as `bot.py`. The `.env` file should look like this, replacing the “your key here” with your key. In the below sections, we explain how to obtain Discord keys and Mistral API keys.
+3. Create a file called `.env` the same directory/folder as `bot.py`. The `.env` file should look like this, replacing the "your key here" with your key. In the below sections, we explain how to obtain Discord keys and Mistral API keys.
 
 ```
-DISCORD_TOKEN=“your key here”
-MISTRAL_API_KEY=“your key here”
+DISCORD_TOKEN="your key here"
+MISTRAL_API_KEY="your key here"
 ```
 
 #### Making the bot
 
-1. Go to https://discord.com/developers and click “New Application” in the top right corner.
+1. Go to https://discord.com/developers and click "New Application" in the top right corner.
 2. Pick a cool name for your new bot!
 
-##### It is very important that you name your app exactly following this scheme; some parts of the bot’s code rely on this format.
+##### It is very important that you name your app exactly following this scheme; some parts of the bot's code rely on this format.
 
-1. Next, you’ll want to click on the tab labeled “Bot” under “Settings.”
-2. Click “Copy” to copy the bot’s token. If you don’t see “Copy”, hit “Reset Token” and copy the token that appears (make sure you’re the first team member to go through these steps!)
+1. Next, you'll want to click on the tab labeled "Bot" under "Settings."
+2. Click "Copy" to copy the bot's token. If you don't see "Copy", hit "Reset Token" and copy the token that appears (make sure you're the first team member to go through these steps!)
 3. Open `.env` and paste the token between the quotes on the line labeled `DISCORD_TOKEN`.
-4. Scroll down to a region called “Privileged Gateway Intents”
-5. Tick the options for “Presence Intent”, “Server Members Intent”, and “Message Content Intent”, and save your changes.
-6. Click on the tab labeled “OAuth2” under “Settings”
-7. Locate the tab labeled “OAuth2 URL Generator” under “OAuth2”. Check the box labeled “bot”. Once you do that, another area with a bunch of options should appear lower down on the page.
-8. Check the following permissions, then copy the link that’s generated. <em>Note that these permissions are just a starting point for your bot. We think they’ll cover most cases, but you may run into cases where you want to be able to do more. If you do, you’re welcome to send updated links to the teaching team to re-invite your bot with new permissions.</em>
+4. Scroll down to a region called "Privileged Gateway Intents"
+5. Tick the options for "Presence Intent", "Server Members Intent", and "Message Content Intent", and save your changes.
+6. Click on the tab labeled "OAuth2" under "Settings"
+7. Locate the tab labeled "OAuth2 URL Generator" under "OAuth2". Check the box labeled "bot". Once you do that, another area with a bunch of options should appear lower down on the page.
+8. Check the following permissions, then copy the link that's generated. <em>Note that these permissions are just a starting point for your bot. We think they'll cover most cases, but you may run into cases where you want to be able to do more. If you do, you're welcome to send updated links to the teaching team to re-invite your bot with new permissions.</em>
   <img width="1097" alt="bot_permissions" src="https://github.com/user-attachments/assets/4db80209-e8d3-4e71-8cff-5f5e04beceeb" />
 9. Copy paste this link into the #app-invite-link channel on the CS 153 Discord server. Someone in the teaching team will invite your bot.
 10. After your bot appears in #welcome, find your bot's "application ID" on the Discord Developer panel.
@@ -115,18 +221,18 @@ MISTRAL_API_KEY=“your key here”
 #### Setting up the Mistral API key
 
 1. Go to [Mistral AI Console](https://console.mistral.ai) and sign up for an account. During sign-up, you will be prompted to set up a workspace. Choose a name for your workspace and select "I'm a solo creator." If you already have an account, log in directly.
-2. After logging in, navigate to the "Workspace" section on the left-hand menu. Click on "Billing" and select “Experiment for free”.
+2. After logging in, navigate to the "Workspace" section on the left-hand menu. Click on "Billing" and select "Experiment for free".
 3. A pop-up window will appear. Click "Accept" to subscribe to the experiment plan and follow the instructions to verify your phone number. After verifying your phone number, you may need to click "Experiment for free" again to finish subscribing. 
-4. Once you have successfully subscribed to the experiment plan, go to the "API keys" page under the “API” section in the menu on the left.
+4. Once you have successfully subscribed to the experiment plan, go to the "API keys" page under the "API" section in the menu on the left.
 5. Click on "Create new key" to generate a new API key.
-6. After the key is generated, it will appear under “Your API keys” with the text: `“Your key is: <your-api-key>”`. Copy the API key and save it securely, as it will not be displayed again for security reasons.
+6. After the key is generated, it will appear under "Your API keys" with the text: `"Your key is: <your-api-key>"``. Copy the API key and save it securely, as it will not be displayed again for security reasons.
 7. Open your `.env` file and paste the API key between the quotes on the line labeled `MISTRAL_API_KEY`.
 
 #### Setting up the starter code
 
 We'll be using Python, if you've got a good Python setup already, great! But make sure that it is at least Python version 3.8. If not, the easiest thing to do is to make sure you have at least 3GB free on your computer and then to head over to [miniconda install](https://docs.anaconda.com/miniconda/install/) and install the Python 3 version of Anaconda. It will work on any operating system.
 
-After you have installed conda, close any open terminals you might have. Then open a terminal in the same folder as your `bot.py` file (If you haven’t used your terminal before, check out [this guide](https://www.macworld.com/article/2042378/master-the-command-line-navigating-files-and-folders.html)!). Once in, run the following command
+After you have installed conda, close any open terminals you might have. Then open a terminal in the same folder as your `bot.py` file (If you haven't used your terminal before, check out [this guide](https://www.macworld.com/article/2042378/master-the-command-line-navigating-files-and-folders.html)!). Once in, run the following command
 
 ## 1. Create an environment with dependencies specified in env.yml:
     conda env create -f local_env.yml
@@ -140,7 +246,7 @@ This will install the required dependencies to start the project.
 
 The starter code includes two files, `bot.py` and `agent.py`. Let's take a look at what this project already does.
 
-To do this, run `python3 bot.py` and leave it running in your terminal. Next, go into your team’s channel `Group-Name` and try typing any message. You should see the bot respond in the same channel. The default behavior of the bot is, that any time it sees a message (from a user), it sends that message to Mistral's API and sends back the response.
+To do this, run `python3 bot.py` and leave it running in your terminal. Next, go into your team's channel `Group-Name` and try typing any message. You should see the bot respond in the same channel. The default behavior of the bot is, that any time it sees a message (from a user), it sends that message to Mistral's API and sends back the response.
 
 Let's take a deeper look into how this is done. In the `bot.py` file, scroll to the `on_message` function. This function is called every time a message is sent in your channel. Observe how `agent.run()` is called on the message content, and how the result of that message call is sent back to the user.
 
@@ -152,4 +258,4 @@ Check out this finalized [weather agent bot](https://github.com/CS-153/weather-a
 
 ### `Exception: .env not found`!
 
-If you’re seeing this error, it probably means that your terminal is not open in the right folder. Make sure that it is open inside the folder that contains `bot.py` and `.env`
+If you're seeing this error, it probably means that your terminal is not open in the right folder. Make sure that it is open inside the folder that contains `bot.py` and `.env`

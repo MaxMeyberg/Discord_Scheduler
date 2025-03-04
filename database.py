@@ -2,6 +2,7 @@ import sqlite3
 import json
 import os
 import aiosqlite  # For async database operations
+from datetime import datetime
 
 class Database:
     def __init__(self):
@@ -31,6 +32,11 @@ class Database:
             discord_id = str(user_data.get("discord_id"))
             discord_name = user_data.get("discord_name", "")
             auth_code = user_data.get("auth_code", "")
+            
+            # Add registration timestamp if not already present
+            if "registered_at" not in user_data:
+                user_data["registered_at"] = datetime.now().timestamp()
+            
             # Store additional data as JSON
             data = json.dumps({k: v for k, v in user_data.items() 
                               if k not in ["discord_id", "discord_name", "auth_code"]})
@@ -71,31 +77,26 @@ class Database:
             await db.commit()
             return True  # Assume success 
 
-    async def get_all_users(self):
-        """Get all users from database"""
+    async def execute(self, query, params=None):
+        """Execute a query and return the result and description"""
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT * FROM users")
-            rows = await cursor.fetchall()
-            
-            if not rows:
-                return []
-                
-            users = []
-            for row in rows:
-                user_data = {
-                    "discord_id": row[0],
-                    "discord_name": row[1],
-                    "auth_code": row[2]
-                }
-                
-                # Add any additional data
-                if row[3]:
-                    try:
-                        extra_data = json.loads(row[3])
-                        user_data.update(extra_data)
-                    except:
-                        pass
-                        
-                users.append(user_data)
-                
-            return users 
+            cursor = await db.execute(query, params or ())
+            result = await cursor.fetchall()
+            # Get the description before cursor is closed
+            description = cursor.description
+            return result, description
+
+    async def get_all_users(self):
+        """Get all users from the database"""
+        query = "SELECT * FROM users"
+        result, description = await self.execute(query)
+        
+        # Convert to list of dictionaries
+        users = []
+        for row in result:
+            user = {}
+            for idx, column in enumerate(description):
+                user[column[0]] = row[idx]
+            users.append(user)
+        
+        return users 

@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from agent import MistralAgent
 from datetime import datetime, timedelta
 import json
+import asyncio
+import pytz
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +26,12 @@ agent = MistralAgent(bot)
 
 # Remove default help command
 bot.remove_command('help')
+
+# At the top of your file
+ADMIN_USERS = [
+    "maxmeyberg",  # Your Discord ID
+    "temo"  # Another admin's Discord ID
+]
 
 @bot.event
 async def on_ready():
@@ -73,6 +81,38 @@ async def help_command(ctx):
         value="Show your calendar in ASCII art format",
         inline=False
     )
+    
+    embed.add_field(
+        name="!simplecal", 
+        value="Show your calendar in a simple text format",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="!find_times [@user1 @user2 ...]", 
+        value="Find common free times between you and mentioned users",
+        inline=False
+    )
+    
+    # Add admin commands if the user is an admin
+    if ctx.author.name.lower() in [name.lower() for name in ADMIN_USERS]:
+        embed.add_field(
+            name="!users", 
+            value="Show all registered users (admin only)",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="!viewcal [username]", 
+            value="View another user's calendar (admin only)",
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="!users", 
+            value="Show all registered users (admin only)",
+            inline=False
+        )
     
     embed.add_field(
         name="!help", 
@@ -496,6 +536,444 @@ async def simple_calendar(ctx):
     except Exception as e:
         await ctx.send(f"❌ Calendar error: {e}")
 
+# Adding a User List Command with Password Protection
+
+@bot.command(name="users", help="Show all registered users (admin only)")
+async def list_users(ctx):
+    """Display all registered users (requires permission)"""
+    user = ctx.author
+    
+    # Check if user is an admin by username instead of ID
+    if user.name.lower() not in [name.lower() for name in ADMIN_USERS]:
+        await ctx.send(f"{user.mention}, sorry, you don't have permission to use this command.")
+        return
+    
+    # Get all users from database
+    all_users = await agent.db.get_all_users()
+    
+    if not all_users:
+        await ctx.send("No registered users found!")
+        return
+    
+    # Create a nicely formatted table with user info
+    table = "```\n"
+    table += "📊 Registered Users\n\n"
+    
+    # Add header - removed Email column
+    table += f"{'#':<3} {'Username':<20} {'Registered':<20}\n"
+    table += "─" * 45 + "\n"  # Reduced width now that email is gone
+    
+    # Add each user row
+    for i, user_data in enumerate(all_users, 1):
+        discord_name = user_data.get("discord_name", "Unknown")
+        
+        # Format registration date
+        reg_date = "Unknown"
+        registered_at = None
+        if "data" in user_data and user_data["data"]:
+            try:
+                data_json = json.loads(user_data["data"])
+                registered_at = data_json.get("registered_at")
+            except:
+                pass
+        
+        if registered_at:
+            try:
+                reg_datetime = datetime.fromtimestamp(float(registered_at))
+                # Format as "March 4 3:24P"
+                month = reg_datetime.strftime("%B")
+                day = reg_datetime.day  # No leading zero
+                hour = reg_datetime.hour % 12  # Convert to 12-hour format
+                if hour == 0:
+                    hour = 12  # Handle noon/midnight
+                minute = reg_datetime.strftime("%M")
+                am_pm = "AM" if reg_datetime.hour < 12 else "PM"  # Just A or P instead of AM/PM
+                
+                reg_date = f"{month} {day} {hour}:{minute}{am_pm}"
+            except:
+                pass
+        
+        # Add row to table - removed email
+        table += f"{i:<3} {discord_name[:20]:<20} {reg_date:<20}\n"
+    
+    table += "```"
+    
+    # Send the results
+    await ctx.send(table)
+
+# Adding Admin Calendar Viewing Functionality
+
+@bot.command(name="viewcal", help="Admin: View another user's calendar")
+async def view_calendar(ctx, username=None):
+    """View a user's calendar (admin only, or your own)"""
+    requester = ctx.author
+    
+    # If no username provided, show the requester's own calendar
+    if not username:
+        await simple_calendar(ctx)
+        return
+    
+    # Check if requester is admin
+    if requester.name.lower() not in [name.lower() for name in ADMIN_USERS]:
+        await ctx.send(f"{requester.mention}, sorry, you don't have permission to view other users' calendars.")
+        return
+    
+    # Get all users to find the one we're looking for
+    all_users = await agent.db.get_all_users()
+    target_user_data = None
+    
+    # Find the user by name
+    for user_data in all_users:
+        if user_data.get("discord_name", "").lower() == username.lower():
+            target_user_data = user_data
+            break
+    
+    if not target_user_data:
+        await ctx.send(f"❌ User '{username}' not found or not registered.")
+        return
+    
+    await ctx.send(f"📅 Fetching {username}'s calendar...")
+    
+    try:
+        # Get token from the target user's data
+        auth_token = target_user_data.get("access_token")
+        if not auth_token:
+            # Try to get from data field as fallback
+            data_json = json.loads(target_user_data.get("data", "{}"))
+            auth_token = data_json.get("access_token", target_user_data.get("auth_code"))
+            
+        if not auth_token:
+            await ctx.send(f"❌ Couldn't find authorization token for {username}. They may need to re-register.")
+            return
+        
+        # Get events for next 7 days
+        start_date = datetime.now().date()
+        end_date = start_date + timedelta(days=7)
+        
+        # Call API
+        status, response_text = await agent.cronofy_api_call(
+            endpoint="v1/events",
+            auth_token=auth_token,
+            params={
+                "tzid": "America/Los_Angeles",
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+            }
+        )
+        
+        if status != 200:
+            if status == 401:
+                await ctx.send(f"❌ **Authentication Error:** {username}'s calendar connection needs to be refreshed. They should `!unregister` and then `!register` again.")
+            else:
+                await ctx.send(f"❌ Error fetching {username}'s calendar: {status}")
+            return
+            
+        # Parse response with super safe error handling
+        email = "Unknown"
+        if "data" in target_user_data and target_user_data["data"]:
+            try:
+                data_json = json.loads(target_user_data["data"])
+                email = data_json.get("email", "Unknown")
+            except:
+                pass
+        
+        calendar_text = f"📅 **{username}'s Calendar** ({email})\n\n"
+        
+        try:
+            data = json.loads(response_text)
+            events = data.get("events", [])
+            
+            # Group events by day
+            days = {}
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                    
+                # Get summary safely
+                summary = str(event.get("summary", "Busy Time"))
+                
+                # Handle different API response formats for start time
+                start_str = None
+                
+                # Check if start is a direct ISO string
+                if isinstance(event.get("start"), str) and "T" in event.get("start"):
+                    start_str = event.get("start")
+                # Check for dictionary format
+                elif isinstance(event.get("start"), dict):
+                    start_str = event.get("start").get("time") or event.get("start").get("date")
+                
+                if not start_str:
+                    continue
+                    
+                # Parse the start time
+                try:
+                    if "T" in start_str:
+                        event_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                        day_str = event_dt.strftime("%Y-%m-%d")
+                        time_str = event_dt.strftime("%I:%M %p")
+                    else:
+                        day_str = start_str
+                        time_str = "All day"
+                        
+                    # Add to days dict
+                    if day_str not in days:
+                        days[day_str] = []
+                        
+                    days[day_str].append(f"• {time_str}: {summary}")
+                except:
+                    continue
+            
+            # Now format the days
+            for day_str in sorted(days.keys()):
+                try:
+                    day_date = datetime.fromisoformat(day_str).date()
+                    day_name = day_date.strftime("%A, %B %d")
+                    
+                    calendar_text += f"**{day_name}**\n"
+                    for event_str in days[day_str]:
+                        calendar_text += f"{event_str}\n"
+                    calendar_text += "\n"
+                except:
+                    continue
+                    
+            if not days:
+                calendar_text += "No events found in their calendar."
+                
+            await ctx.send(calendar_text)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error parsing calendar: {e}")
+            
+    except Exception as e:
+        await ctx.send(f"❌ Calendar error: {e}")
+
 # Start the bot
+@bot.command(name="find_times")
+async def find_times(ctx, *users: discord.Member):
+    """Find common available times between multiple users using Cronofy's Availability API"""
+    
+    # Check if users were provided
+    if not users:
+        await ctx.send("❌ Please mention at least one user to find common times with.")
+        return
+    
+    # Add the command author to the list if they're not already included
+    requester = ctx.author
+    all_users = list(users)
+    if requester not in all_users:
+        all_users.insert(0, requester)  # Add requester as first user
+    
+    await ctx.send(f"🔍 Looking for common free times between {', '.join([user.name for user in all_users])}...")
+    
+    # Check if all users are registered and collect their tokens
+    participants = []
+    missing_users = []
+    
+    for user in all_users:
+        user_data = await agent.db.get_user(str(user.id))
+        if not user_data:
+            missing_users.append(user.name)
+            continue
+            
+        # Get token
+        auth_token = user_data.get("access_token")
+        if not auth_token and "data" in user_data:
+            # Try to get from data field as fallback
+            try:
+                data_json = json.loads(user_data.get("data", "{}"))
+                auth_token = data_json.get("access_token", user_data.get("auth_code"))
+            except:
+                pass
+        
+        if not auth_token:
+            missing_users.append(user.name)
+            continue
+            
+        # First get profile ID for this user
+        status, profile_response = await agent.cronofy_api_call(
+            endpoint="v1/userinfo",
+            method="GET",
+            auth_token=auth_token
+        )
+        
+        if status != 200:
+            await ctx.send(f"⚠️ Couldn't fetch profile for {user.name}: Error {status}")
+            continue
+            
+        try:
+            profile_data = json.loads(profile_response)
+            profile_id = profile_data.get("sub")
+            
+            if not profile_id:
+                await ctx.send(f"⚠️ Couldn't find profile ID for {user.name}")
+                continue
+            
+            # Get calendars for this user
+            status, calendars_response = await agent.cronofy_api_call(
+                endpoint="v1/calendars",
+                method="GET",
+                auth_token=auth_token
+            )
+            
+            if status != 200:
+                await ctx.send(f"⚠️ Couldn't fetch calendars for {user.name}: Error {status}")
+                continue
+                
+            calendars_data = json.loads(calendars_response)
+            calendar_ids = []
+            
+            for calendar in calendars_data.get("calendars", []):
+                calendar_ids.append(calendar.get("calendar_id"))
+            
+            if not calendar_ids:
+                await ctx.send(f"⚠️ No calendars found for {user.name}")
+                continue
+                
+            # Add user to participants list correctly
+            participants.append({
+                "required": "all",  # This user must be available
+                "members": [{
+                    "sub": profile_id,
+                    "calendar_ids": calendar_ids
+                }]
+            })
+        except Exception as e:
+            await ctx.send(f"⚠️ Error processing {user.name}'s profile: {str(e)}")
+            continue
+    
+    # Check if we're missing any users
+    if missing_users:
+        if len(missing_users) == len(all_users):
+            await ctx.send("❌ None of the mentioned users are registered with Schedge.")
+            return
+        
+        await ctx.send(f"⚠️ Warning: The following users are not registered: {', '.join(missing_users)}")
+    
+    if not participants:
+        await ctx.send("❌ No valid participants found with registered calendars.")
+        return
+    
+    # Set up availability query parameters
+    start_date = datetime.now().date()
+    end_date = start_date + timedelta(days=7)
+
+    # Get current time in Pacific time
+    pacific_tz = pytz.timezone('America/Los_Angeles')
+    now_pacific = datetime.now(pacific_tz)
+
+    # If it's already past 9am, start from tomorrow instead
+    if now_pacific.hour >= 9:
+        start_date = (now_pacific + timedelta(days=1)).date()
+    
+    # Format dates correctly - no Z suffix for local time
+    start_datetime = pacific_tz.localize(datetime.combine(start_date, datetime.min.time().replace(hour=9)))
+    end_datetime = pacific_tz.localize(datetime.combine(end_date, datetime.min.time().replace(hour=18)))
+
+    # Improved availability request with proper timezone handling
+    availability_request = {
+        "participants": participants,
+        "required_duration": {"minutes": 30},
+        "query_periods": [
+            {
+                "start": start_datetime.isoformat(),
+                "end": end_datetime.isoformat()
+            }
+        ],
+        "tzid": "America/Los_Angeles"
+    }
+    
+    # Print the request for debugging
+    await ctx.send("Checking availability... (this might take a moment)")
+    print(f"Availability request: {json.dumps(availability_request, indent=2)}")
+    
+    try:
+        # Call Cronofy Availability API - use a valid token
+        status, response_text = await agent.cronofy_api_call(
+            endpoint="v1/availability",
+            method="POST",
+            auth_token=auth_token,  # Use the last valid token we found
+            json_data=availability_request
+        )
+        
+        if status != 200:
+            # Print the request and response for debugging
+            print(f"Error response: {response_text}")
+            await ctx.send(f"❌ Error checking availability: {status}")
+            return
+            
+        # Parse the response
+        data = json.loads(response_text)
+        available_slots = data.get("available_periods", [])
+        
+        if not available_slots:
+            await ctx.send("😢 No common free times found in the next week during business hours (9 AM - 6 PM).")
+            return
+        
+        # Format the results
+        formatted_calendar = "```\n"
+        formatted_calendar += f"📅 Common Free Times for {len(participants)} Users\n\n"
+        
+        # Group slots by day
+        slots_by_day = {}
+        
+        for slot in available_slots:
+            start_time = datetime.fromisoformat(slot["start"].replace("Z", "+00:00"))
+            pacific_tz = pytz.timezone('America/Los_Angeles')
+            start_time = start_time.astimezone(pacific_tz)
+            
+            day_key = start_time.strftime("%Y-%m-%d")
+            if day_key not in slots_by_day:
+                slots_by_day[day_key] = []
+                
+            slots_by_day[day_key].append(start_time)
+        
+        # Process each day
+        for day_key in sorted(slots_by_day.keys()):
+            day_obj = datetime.strptime(day_key, "%Y-%m-%d")
+            day_name = day_obj.strftime("%A, %B %d")
+            
+            formatted_calendar += f"=== {day_name} ===\n"
+            
+            # Group consecutive time slots
+            slots = sorted(slots_by_day[day_key])
+            slot_groups = []
+            
+            if slots:
+                current_group = [slots[0]]
+                
+                for i in range(1, len(slots)):
+                    prev_slot = slots[i-1]
+                    curr_slot = slots[i]
+                    
+                    # Check if slots are consecutive (30 min apart)
+                    if (curr_slot - prev_slot).total_seconds() == 1800:  # 30 minutes in seconds
+                        current_group.append(curr_slot)
+                    else:
+                        # Start a new group
+                        slot_groups.append(current_group)
+                        current_group = [curr_slot]
+                
+                # Add the last group
+                slot_groups.append(current_group)
+                
+                # Format each group
+                for group in slot_groups:
+                    start_time = group[0].strftime("%-I:%M %p")  # No leading zero
+                    end_time = (group[-1] + timedelta(minutes=30)).strftime("%-I:%M %p")  # Add 30 min to end
+                    formatted_calendar += f"  • {start_time} - {end_time}\n"
+            else:
+                formatted_calendar += "  • No free times\n"
+                
+            formatted_calendar += "\n"
+        
+        formatted_calendar += "```"
+        
+        # Send the formatted calendar
+        await ctx.send(formatted_calendar)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error processing availability: {str(e)}")
+
+# Always keep this as the LAST line in your file
 token = os.getenv("DISCORD_TOKEN")
 bot.run(token)

@@ -9,6 +9,7 @@ import threading
 import time
 from database import Database
 import aiohttp
+import aiosqlite
 
 MISTRAL_MODEL = "mistral-large-latest"
 SYSTEM_PROMPT = "You are a helpful assistant."
@@ -463,7 +464,7 @@ class MistralAgent:
         redirect_uri = os.getenv("CRONOFY_REDIRECT_URI")
         
         # Exchange code for tokens
-        async with aiohttp.ClientSession() as session:
+        async with aiosqlite.ClientSession() as session:
             token_url = "https://api.cronofy.com/oauth/token"
             payload = {
                 "client_id": client_id,
@@ -479,14 +480,29 @@ class MistralAgent:
                     
                 token_data = await response.json()
                 
-                # Store both the auth code and access token
+                # Get user profile info to get their email
+                profile_response = await self.cronofy_api_call(
+                    endpoint="v1/userinfo",
+                    auth_token=token_data.get("access_token")
+                )
+                
+                email = "unknown@example.com"
+                if profile_response[0] == 200:
+                    try:
+                        profile_data = json.loads(profile_response[1])
+                        email = profile_data.get("email", email)
+                    except:
+                        pass
+                
+                # Store both the auth code, access token and email
                 user_data = {
                     "discord_id": str(user.id),
                     "discord_name": user.name,
                     "auth_code": auth_code,
                     "access_token": token_data.get("access_token"),
                     "refresh_token": token_data.get("refresh_token"),
-                    "token_expiry": datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                    "token_expiry": datetime.now().timestamp() + token_data.get("expires_in", 3600),
+                    "email": email
                 }
                 
                 # Save user data to database
