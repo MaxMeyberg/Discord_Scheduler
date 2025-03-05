@@ -30,8 +30,25 @@ bot.remove_command('help')
 # At the top of your file
 ADMIN_USERS = [
     "maxmeyberg",  # Your Discord ID
-    "temo"  # Another admin's Discord ID
+    "maxtonian",
+    "itsalbertom",  # Another admin's Discord ID
 ]
+
+# At the top of the file, add debugging for admin users
+def is_admin(member):
+    """Check if a member is an admin using their username or display name"""
+    # Print debug info to see the actual values being compared
+    print(f"Admin check for: username='{member.name}', display_name='{member.display_name}'")
+    print(f"Admin list: {ADMIN_USERS}")
+    
+    # Check both username and display_name against the admin list
+    is_admin_user = (
+        member.name.lower() in [name.lower() for name in ADMIN_USERS] or 
+        member.display_name.lower() in [name.lower() for name in ADMIN_USERS]
+    )
+    
+    print(f"Is admin result: {is_admin_user}")
+    return is_admin_user
 
 @bot.event
 async def on_ready():
@@ -53,6 +70,108 @@ async def on_message(message):
     if isinstance(message.channel, discord.DMChannel) and not message.content.startswith(PREFIX):
         await agent.process_registration_dm(message)
         return
+    
+    # Check if bot is mentioned in a message
+    if bot.user in message.mentions:
+        # Message content without the mention
+        clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
+        
+        # Create a mock message object or modify the agent.run call - choose one approach:
+        
+        # APPROACH 1: Direct API call to Mistral bypassing agent.run
+        system_message = f"""TASK: Parse the following message and extract calendar scheduling intent.
+Message: "{clean_content}"
+
+Extract:
+1. Is this asking for calendar availability or free times? (yes/no)
+2. Which users are mentioned? List their exact @mentions or names.
+3. Is there a specific time period mentioned? (today, tomorrow, this week, next Thursday, etc.)
+
+Format your response as JSON:
+{{
+  "is_scheduling": true/false,
+  "users": ["@user1", "@user2", ...],
+  "time_period": "today"/"tomorrow"/"this week"/null
+}}
+"""
+        
+        # Call Mistral API directly
+        response = await agent.client.chat.complete_async(
+            model="mistral-large-latest",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": clean_content}
+            ]
+        )
+        response_text = response.choices[0].message.content
+        
+        try:
+            # Try to extract JSON from the response
+            import re
+            json_match = re.search(r'```(?:json)?\s*({.*?})\s*```', response_text, re.DOTALL)
+            if json_match:
+                intent_data = json.loads(json_match.group(1))
+            else:
+                # If no JSON block found, try to parse the entire response
+                intent_data = json.loads(response_text)
+                
+            # Process scheduling intent
+            if intent_data.get("is_scheduling", False):
+                # Extract time period
+                time_period = intent_data.get("time_period", "week")
+                
+                # Process mentioned users
+                mentioned_users = []
+                
+                # Extract users from message mentions
+                for user in message.mentions:
+                    if user != bot.user:  # Skip the bot itself
+                        mentioned_users.append(user)
+                
+                # If we didn't find mentions, try to find users by name
+                if not mentioned_users:
+                    guild_members = message.guild.members
+                    for user_name in intent_data.get("users", []):
+                        # Strip @ if present
+                        if user_name.startswith('@'):
+                            user_name = user_name[1:]
+                        
+                        # Find user by name
+                        for member in guild_members:
+                            if (user_name.lower() in member.name.lower() or 
+                                user_name.lower() in member.display_name.lower()):
+                                mentioned_users.append(member)
+                                break
+                
+                # If we found users, execute the find_times command with the right parameters
+                if mentioned_users:
+                    # Create a custom context for the command
+                    ctx = await bot.get_context(message)
+                    
+                    # Choose the date range based on the time period
+                    today = datetime.now().date()
+                    
+                    if time_period == "today":
+                        # Modify the find_times command to only show today
+                        # Save original start_date and end_date
+                        original_start_date = find_times.__globals__.get("start_date")
+                        original_end_date = find_times.__globals__.get("end_date")
+                        
+                        # Override for this call
+                        find_times.__globals__["start_date"] = today
+                        find_times.__globals__["end_date"] = today
+                        
+                        # Call the command
+                        await find_times(ctx, *mentioned_users)
+                        
+                        # Restore original values
+                        find_times.__globals__["start_date"] = original_start_date
+                        find_times.__globals__["end_date"] = original_end_date
+                    else:
+                        # Use default week-long range
+                        await find_times(ctx, *mentioned_users)
+        except Exception as e:
+            print(f"Error processing natural language query: {e}")
 
 @bot.command(name="help", help="Show available commands")
 async def help_command(ctx):
@@ -95,7 +214,7 @@ async def help_command(ctx):
     )
     
     # Add admin commands if the user is an admin
-    if ctx.author.name.lower() in [name.lower() for name in ADMIN_USERS]:
+    if is_admin(ctx.author):
         embed.add_field(
             name="!users", 
             value="Show all registered users (admin only)",
@@ -543,8 +662,8 @@ async def list_users(ctx):
     """Display all registered users (requires permission)"""
     user = ctx.author
     
-    # Check if user is an admin by username instead of ID
-    if user.name.lower() not in [name.lower() for name in ADMIN_USERS]:
+    # Use the is_admin function for checking
+    if not is_admin(user):
         await ctx.send(f"{user.mention}, sorry, you don't have permission to use this command.")
         return
     
@@ -614,7 +733,7 @@ async def view_calendar(ctx, username=None):
         return
     
     # Check if requester is admin
-    if requester.name.lower() not in [name.lower() for name in ADMIN_USERS]:
+    if not is_admin(requester):
         await ctx.send(f"{requester.mention}, sorry, you don't have permission to view other users' calendars.")
         return
     
@@ -763,7 +882,9 @@ async def find_times(ctx, *users: discord.Member):
     if requester not in all_users:
         all_users.insert(0, requester)  # Add requester as first user
     
-    await ctx.send(f"🔍 Looking for common free times between {', '.join([user.name for user in all_users])}...")
+    # Debug message with all users being checked
+    debug_users = ', '.join([f"{user.name} ({user.id})" for user in all_users])
+    await ctx.send(f"🔍 Looking for common free times between: {debug_users}...")
     
     # Check if all users are registered and collect their tokens
     participants = []
@@ -775,18 +896,25 @@ async def find_times(ctx, *users: discord.Member):
             missing_users.append(user.name)
             continue
             
-        # Get token
+        # Get token with more detailed debugging
         auth_token = user_data.get("access_token")
-        if not auth_token and "data" in user_data:
-            # Try to get from data field as fallback
+        if not auth_token:
+            # Try alternative fields
             try:
-                data_json = json.loads(user_data.get("data", "{}"))
-                auth_token = data_json.get("access_token", user_data.get("auth_code"))
-            except:
-                pass
+                if "data" in user_data:
+                    data_json = json.loads(user_data.get("data", "{}"))
+                    auth_token = data_json.get("access_token")
+                
+                if not auth_token and "auth_code" in user_data:
+                    auth_token = user_data.get("auth_code")
+                    
+                print(f"Using alternative token source for {user.name}: {auth_token[:10]}...")
+            except Exception as e:
+                print(f"Token extraction error for {user.name}: {e}")
         
         if not auth_token:
             missing_users.append(user.name)
+            print(f"No valid auth token found for {user.name}")
             continue
             
         # First get profile ID for this user
@@ -798,17 +926,20 @@ async def find_times(ctx, *users: discord.Member):
         
         if status != 200:
             await ctx.send(f"⚠️ Couldn't fetch profile for {user.name}: Error {status}")
+            print(f"Profile fetch error for {user.name}: {profile_response}")
             continue
             
         try:
             profile_data = json.loads(profile_response)
             profile_id = profile_data.get("sub")
             
+            print(f"Profile data for {user.name}: {json.dumps(profile_data, indent=2)}")
+            
             if not profile_id:
                 await ctx.send(f"⚠️ Couldn't find profile ID for {user.name}")
                 continue
             
-            # Get calendars for this user
+            # Get calendars for this user with error details
             status, calendars_response = await agent.cronofy_api_call(
                 endpoint="v1/calendars",
                 method="GET",
@@ -817,19 +948,31 @@ async def find_times(ctx, *users: discord.Member):
             
             if status != 200:
                 await ctx.send(f"⚠️ Couldn't fetch calendars for {user.name}: Error {status}")
+                print(f"Calendar fetch error for {user.name}: {calendars_response}")
                 continue
                 
             calendars_data = json.loads(calendars_response)
+            print(f"Calendars for {user.name}: {json.dumps(calendars_data, indent=2)}")
+            
             calendar_ids = []
             
             for calendar in calendars_data.get("calendars", []):
-                calendar_ids.append(calendar.get("calendar_id"))
+                # Only include read-write calendars that can be used for availability
+                if calendar.get("calendar_readonly", True) == False:
+                    calendar_ids.append(calendar.get("calendar_id"))
+                else:
+                    print(f"Skipping read-only calendar: {calendar.get('calendar_name')}")
+            
+            # If no writeable calendars, include all calendars as fallback
+            if not calendar_ids:
+                for calendar in calendars_data.get("calendars", []):
+                    calendar_ids.append(calendar.get("calendar_id"))
             
             if not calendar_ids:
                 await ctx.send(f"⚠️ No calendars found for {user.name}")
                 continue
                 
-            # Add user to participants list correctly
+            # Add user to participants list with more detailed structure
             participants.append({
                 "required": "all",  # This user must be available
                 "members": [{
@@ -837,8 +980,12 @@ async def find_times(ctx, *users: discord.Member):
                     "calendar_ids": calendar_ids
                 }]
             })
+            
+            print(f"Added participant {user.name} with profile ID {profile_id} and calendars: {calendar_ids}")
         except Exception as e:
             await ctx.send(f"⚠️ Error processing {user.name}'s profile: {str(e)}")
+            import traceback
+            traceback.print_exc()
             continue
     
     # Check if we're missing any users

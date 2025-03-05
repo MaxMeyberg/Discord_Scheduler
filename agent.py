@@ -548,3 +548,15 @@ class MistralAgent:
         except Exception as e:
             print(f"API call error: {e}")
             return 500, str(e)
+
+    async def run_with_prompt(self, prompt_text):
+        """Run the AI on a specific prompt text instead of a message"""
+        response = await self.client.chat(
+            model="mistral-large-latest",
+            messages=[
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user", "content": prompt_text}
+            ]
+        )
+        
+        return response.choices[0].message.content
