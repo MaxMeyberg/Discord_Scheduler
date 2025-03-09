@@ -74,7 +74,8 @@ ADMIN_USERS = [
 
 ## Database
 
-The bot uses SQLite to store user data:
+The bot uses Supabase to store user data:
+- pip install supabase
 - User Discord IDs and usernames
 - OAuth tokens and calendar connection details
 - Registration timestamps

@@ -1,102 +1,196 @@
-import sqlite3
-import json
 import os
-import aiosqlite  # For async database operations
+import json
 from datetime import datetime
+from typing import Dict, Any, Optional
+from supabase import create_client
+import asyncio
+from dotenv import load_dotenv
 
 class Database:
+    """Database class using Supabase as the backend."""
+    
     def __init__(self):
-        # Create database file in the schedge directory
-        self.db_path = os.path.join(os.path.dirname(__file__), "users.db")
-        # Create tables immediately
-        self.create_tables()
+        """Initialize Supabase connection."""
+        # Explicitly load environment variables
+        load_dotenv()
         
-    def create_tables(self):
-        """Create database tables if they don't exist"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            discord_id TEXT PRIMARY KEY,
-            discord_name TEXT,
-            auth_code TEXT,
-            data TEXT
-        )
-        ''')
-        conn.commit()
-        conn.close()
+        self.supabase_url = os.getenv("SUPABASE_URL")
+        self.supabase_key = os.getenv("SUPABASE_KEY")
         
-    async def save_user(self, user_data):
-        """Save user data to database"""
-        async with aiosqlite.connect(self.db_path) as db:
-            discord_id = str(user_data.get("discord_id"))
-            discord_name = user_data.get("discord_name", "")
-            auth_code = user_data.get("auth_code", "")
+        if not self.supabase_url or not self.supabase_key:
+            print(f"ERROR: Supabase credentials not found in environment variables.")
+            print(f"Looking for: SUPABASE_URL and SUPABASE_KEY")
+            print(f"URL found: {'Yes' if self.supabase_url else 'No'}")
+            print(f"Key found: {'Yes' if self.supabase_key else 'No'}")
+            self.client = None
+        else:
+            try:
+                print(f"Initializing Supabase with URL: {self.supabase_url[:30]}...")
+                self.client = create_client(self.supabase_url, self.supabase_key)
+                print("Supabase client successfully initialized")
+            except Exception as e:
+                print(f"ERROR initializing Supabase client: {e}")
+                self.client = None
+    
+    async def setup(self):
+        """Setup function - not needed for Supabase as tables are created in the dashboard"""
+        print("Using Supabase - tables should be created in the Supabase dashboard")
+        pass
+    
+    async def _run_sync(self, func):
+        """Run a synchronous function in an executor to make it async-compatible"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, func) 
+    
+    async def save_user(self, user_data: Dict[str, Any]) -> bool:
+        """Save user data to Supabase."""
+        if not self.client:
+            print("Supabase client not initialized - cannot save user data")
+            return False
             
-            # Add registration timestamp if not already present
-            if "registered_at" not in user_data:
-                user_data["registered_at"] = datetime.now().timestamp()
-            
-            # Store additional data as JSON
-            data = json.dumps({k: v for k, v in user_data.items() 
-                              if k not in ["discord_id", "discord_name", "auth_code"]})
-            
-            await db.execute(
-                "INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?)",
-                (discord_id, discord_name, auth_code, data)
-            )
-            await db.commit()
-            return user_data
-            
-    async def get_user(self, user_id):
-        """Get user data from database"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT * FROM users WHERE discord_id = ?", (str(user_id),))
-            row = await cursor.fetchone()
-            
-            if not row:
-                return None
-                
-            user_data = {
-                "discord_id": row[0],
-                "discord_name": row[1],
-                "auth_code": row[2]
+        discord_id = user_data.get("discord_id")
+        if not discord_id:
+            return False
+        
+        try:
+            # Prepare data for insertion
+            insert_data = {
+                "discord_id": discord_id,
+                "discord_name": user_data.get("discord_name", ""),
+                "auth_code": user_data.get("auth_code", ""),
+                "access_token": user_data.get("access_token", ""),
+                "refresh_token": user_data.get("refresh_token", ""),
+                "email": user_data.get("email", ""),
+                # Convert timestamp to ISO string if it exists
+                "token_expiry": datetime.fromtimestamp(user_data.get("token_expiry", 0)).isoformat() 
+                if user_data.get("token_expiry") else None,
+                # Store additional data as JSON
+                "data": json.dumps({k: v for k, v in user_data.items() 
+                                if k not in ["discord_id", "discord_name", "auth_code", 
+                                             "access_token", "refresh_token", "email", 
+                                             "token_expiry"]})
             }
             
-            # Add any additional data
-            if row[3]:
-                extra_data = json.loads(row[3])
-                user_data.update(extra_data)
+            # Define a regular function (not async!)
+            def _do_upsert():
+                return self.client.table("users").upsert(insert_data).execute()
+            
+            # Call _run_sync with the function object
+            response = await self._run_sync(_do_upsert)
+            
+            if hasattr(response, 'error') and response.error:
+                print(f"Error saving user: {response.error}")
+                return False
                 
+            print(f"User saved successfully: {discord_id}")
+            return True
+            
+        except Exception as e:
+            print(f"Error saving user to Supabase: {e}")
+            return False
+    
+    async def get_user(self, discord_id: str) -> Optional[Dict[str, Any]]:
+        """Get user data from Supabase."""
+        if not self.client:
+            print("Supabase client not initialized - cannot get user data")
+            return None
+            
+        try:
+            # Define a regular function to pass to run_sync
+            def _do_select():
+                return self.client.table("users").select("*").eq("discord_id", discord_id).execute()
+            
+            # Run the synchronous function in an executor
+            response = await self._run_sync(_do_select)
+            
+            if hasattr(response, 'error') and response.error:
+                print(f"Error getting user: {response.error}")
+                return None
+                
+            data = response.data
+            
+            if not data or len(data) == 0:
+                return None
+                
+            user_data = data[0]
+            
+            # Convert JSON string to dict if it exists
+            if user_data.get("data"):
+                try:
+                    extra_data = json.loads(user_data.get("data", "{}"))
+                    user_data.update(extra_data)
+                except:
+                    pass
+                    
             return user_data
             
-    async def delete_user(self, user_id):
-        """Delete user from database"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM users WHERE discord_id = ?", (str(user_id),))
-            await db.commit()
-            return True  # Assume success 
-
-    async def execute(self, query, params=None):
-        """Execute a query and return the result and description"""
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(query, params or ())
-            result = await cursor.fetchall()
-            # Get the description before cursor is closed
-            description = cursor.description
-            return result, description
-
-    async def get_all_users(self):
-        """Get all users from the database"""
-        query = "SELECT * FROM users"
-        result, description = await self.execute(query)
+        except Exception as e:
+            print(f"Error getting user from Supabase: {e}")
+            return None
+    
+    async def delete_user(self, discord_id: str) -> bool:
+        """Delete user from Supabase."""
+        if not self.client:
+            print("Supabase client not initialized - cannot delete user")
+            return False
+            
+        try:
+            def _do_delete():
+                return self.client.table("users").delete().eq("discord_id", discord_id).execute()
+            
+            response = await self._run_sync(_do_delete)
+            
+            if hasattr(response, 'error') and response.error:
+                print(f"Error deleting user: {response.error}")
+                return False
+                
+            return True
+            
+        except Exception as e:
+            print(f"Error deleting user from Supabase: {e}")
+            return False
+    
+    async def get_all_users(self) -> list:
+        """Get all users from Supabase."""
+        if not self.client:
+            print("Supabase client not initialized - cannot get users")
+            return []
+            
+        try:
+            def _do_select_all():
+                return self.client.table("users").select("*").execute()
+            
+            response = await self._run_sync(_do_select_all)
+            
+            if hasattr(response, 'error') and response.error:
+                print(f"Error getting all users: {response.error}")
+                return []
+                
+            users = response.data
+            
+            # Process each user's extra data
+            for user in users:
+                if user.get("data"):
+                    try:
+                        extra_data = json.loads(user.get("data", "{}"))
+                        user.update(extra_data)
+                    except:
+                        pass
+            
+            return users
+            
+        except Exception as e:
+            print(f"Error getting all users from Supabase: {e}")
+            return [] 
+    
+    async def refresh_token(self, discord_id: str) -> bool:
+        """Refresh an expired Cronofy access token"""
+        user_data = await self.get_user(discord_id)
+        if not user_data or not user_data.get("refresh_token"):
+            return False
         
-        # Convert to list of dictionaries
-        users = []
-        for row in result:
-            user = {}
-            for idx, column in enumerate(description):
-                user[column[0]] = row[idx]
-            users.append(user)
+        # Call Cronofy token refresh endpoint
+        # This would be implemented in agent.py or a separate cronofy.py file
+        # ...
         
-        return users 
+        return True 
