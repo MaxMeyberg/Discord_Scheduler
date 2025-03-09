@@ -10,6 +10,7 @@ import time
 from database import Database
 import aiohttp
 import aiosqlite
+import pyshorteners
 
 MISTRAL_MODEL = "mistral-large-latest"
 SYSTEM_PROMPT = "You are a helpful assistant."
@@ -161,9 +162,10 @@ class MistralAgent:
                     "name": message.author.name
                 }
                 
+                short_url = self.shorten_url(auth_url)
                 await message.author.send(
                     f"Thanks! Your email {email} has been registered.\n\n"
-                    f"Now, to connect your calendar, please click this link:\n{auth_url}\n\n"
+                    f"Now, to connect your calendar, please click this link:\n{short_url}\n\n"
                     f"After authorizing, you'll see a Postman page with a URL that looks like:\n"
                     f"postman://app/oauth2/callback?code=XXXX...\n\n"
                     f"Please copy that ENTIRE URL and paste it back to me here."
@@ -560,3 +562,7 @@ class MistralAgent:
         )
         
         return response.choices[0].message.content
+
+    def shorten_url(self, url):
+        s = pyshorteners.Shortener()
+        return s.tinyurl.short(url)

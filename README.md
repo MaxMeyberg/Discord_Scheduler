@@ -1,8 +1,8 @@
 # Schedge - Discord Calendar Bot
 
-Schedge is a Discord bot that integrates with Google Calendar through Cronofy to help users manage and share their schedules.
+Schedge is a Discord bot that helps users manage and share their calendar schedules through Google Calendar or Outlook.
 
-## Quick Start Guide (For Non-Technical Users)
+## Quick Start Guide
 
 Follow these simple steps to get your own Schedge bot up and running!
 
@@ -10,7 +10,7 @@ Follow these simple steps to get your own Schedge bot up and running!
 
 You'll need:
 - A computer with internet access
-- Python 3.8+ installed (see [Step 1](#step-1-install-python))
+- Python 3.8+ installed
 - A Discord account with admin access to a server
 - Google or Outlook calendar you want to connect
 
@@ -111,6 +111,7 @@ CRONOFY_REDIRECT_URI=https://oauth.pstmn.io/v1/callback
 ADMIN_PASSWORD=your_chosen_admin_password
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_KEY=your_supabase_service_role_key
+TIMEZONE=America/Los_Angeles
 ```
 
 3. Edit `bot.py` and change the `ADMIN_USERS` list to include your Discord username:
@@ -128,18 +129,20 @@ Open a terminal/command prompt in the extracted folder and run:
 **Windows:**
 ```
 pip install -r requirements.txt
+pip install pyshorteners
 python bot.py
 ```
 
 **Mac/Linux:**
 ```
-pip3 install -r requirements.txt
+pip install -r requirements.txt
+pip install pyshorteners
 python3 bot.py
 ```
 
-You should see "Bot is ready" message if everything worked correctly!
+You should see "Bot is ready" message if everything works correctly!
 
-### Using Your Bot
+## Using Your Bot
 
 Once your bot is running, you can use these commands in Discord:
 
@@ -149,12 +152,12 @@ Once your bot is running, you can use these commands in Discord:
 - `!simplecal` - View your calendar as text
 - `!find_times @user1 @user2` - Find common free times
 
-### Admin Commands
+## Admin Commands
 
 - `!users` - Show all registered users
 - `!viewcal [username]` - View another user's calendar
 
-### Troubleshooting
+## Troubleshooting
 
 **Bot doesn't respond:**
 - Make sure the bot is running (terminal shows "Bot is ready")
@@ -172,51 +175,6 @@ Once your bot is running, you can use these commands in Discord:
 
 **If all else fails:**
 Run `python test_supabase.py` to check database connection
-
-## Advanced Configuration
-
-### Dependencies
-
-- discord.py
-- python-dotenv
-- supabase
-- aiohttp
-- pytz (for timezone handling)
-- mistralai (official Mistral AI client)
-
-### Admin Configuration
-
-Admins are defined in the `ADMIN_USERS` list in the `bot.py` file:
-
-```python
-ADMIN_USERS = [
-    "username1",  # Your Discord username
-    "username2"   # Another admin's username
-]
-```
-
-### Database
-
-The bot uses Supabase to store user data:
-- pip install supabase
-- User Discord IDs and usernames
-- OAuth tokens and calendar connection details
-- Registration timestamps
-
-### Setup for Development
-
-1. Create a Discord bot in the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Enable necessary intents (Presence, Server Members, Message Content)
-3. Set up a Cronofy account and create an OAuth application
-4. Add the bot to your Discord server with appropriate permissions
-
-### Resetting the Database
-
-If you need to reset the database:
-
-```
-python reset_db.py
-```
 
 ## License
 

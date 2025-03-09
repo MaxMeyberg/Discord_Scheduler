@@ -50,6 +50,26 @@ def is_admin(member):
     print(f"Is admin result: {is_admin_user}")
     return is_admin_user
 
+# Get the user's timezone - either from .env or their stored preferences
+timezone_str = os.getenv("TIMEZONE", "UTC")
+timezone = pytz.timezone(timezone_str)
+
+# When displaying times to users, convert from UTC to local time with DST awareness
+def format_event_time(utc_time):
+    """Convert UTC time to local time with proper DST handling"""
+    if isinstance(utc_time, str):
+        utc_time = datetime.fromisoformat(utc_time.replace('Z', '+00:00'))
+    
+    # Make sure the time is timezone-aware
+    if utc_time.tzinfo is None:
+        utc_time = pytz.utc.localize(utc_time)
+    
+    # Convert to the user's local timezone
+    local_time = utc_time.astimezone(timezone)
+    
+    # Format for display
+    return local_time.strftime("%I:%M %p")  # e.g., "02:30 PM"
+
 @bot.event
 async def on_ready():
     """Called when the bot is ready"""
@@ -264,10 +284,10 @@ async def register(ctx):
     
     if success:
         await user.send(
-            f"Thanks for registering with Skedge!\n\n"
+            f"Thanks for registering with Schedge!\n\n"
             f"**IMPORTANT:** Before clicking the link below, make sure you're logged into YOUR Google account in your browser.\n\n"
-            f"To connect your calendar, please copy and paste this entire link into your browser:\n"
-            f"```\n{auth_url}\n```\n\n"
+            f"To connect your calendar, click this link:\n"
+            f"{auth_url}\n\n"
             f"After authorizing, you'll see a Postman page with a callback URL that will look like one of these:\n"
             f"• `https://oauth.pstmn.io/v1/callback?code=XXXX...`\n"
             f"• `postman://app/oauth2/callback?code=XXXX...`\n\n"
@@ -827,9 +847,25 @@ async def view_calendar(ctx, username=None):
                 # Parse the start time
                 try:
                     if "T" in start_str:
+                        # Parse with explicit timezone handling
                         event_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                        day_str = event_dt.strftime("%Y-%m-%d")
-                        time_str = event_dt.strftime("%I:%M %p")
+                        
+                        # Ensure it's timezone aware and convert to Pacific time
+                        if event_dt.tzinfo is None:
+                            event_dt = event_dt.replace(tzinfo=pytz.UTC)
+                        
+                        pacific_tz = pytz.timezone('America/Los_Angeles')
+                        local_dt = event_dt.astimezone(pacific_tz)
+                        
+                        # Format with timezone name for clarity
+                        day_str = local_dt.strftime("%Y-%m-%d")
+                        time_str = local_dt.strftime("%I:%M %p")
+                        
+                        # Add timezone indicator
+                        if local_dt.dst():
+                            time_str += " PDT"
+                        else:
+                            time_str += " PST"
                     else:
                         day_str = start_str
                         time_str = "All day"
@@ -1064,9 +1100,12 @@ async def find_times(ctx, *users: discord.Member):
         slots_by_day = {}
         
         for slot in available_slots:
+            # Explicitly handle the timezone conversion with DST awareness
             start_time = datetime.fromisoformat(slot["start"].replace("Z", "+00:00"))
             pacific_tz = pytz.timezone('America/Los_Angeles')
-            start_time = start_time.astimezone(pacific_tz)
+            # Force timezone recalculation to handle DST properly
+            utc_time = start_time.replace(tzinfo=pytz.UTC)
+            start_time = utc_time.astimezone(pacific_tz)
             
             day_key = start_time.strftime("%Y-%m-%d")
             if day_key not in slots_by_day:
@@ -1105,9 +1144,17 @@ async def find_times(ctx, *users: discord.Member):
                 
                 # Format each group
                 for group in slot_groups:
+                    # Use timezone-aware formatting for times
                     start_time = group[0].strftime("%-I:%M %p")  # No leading zero
                     end_time = (group[-1] + timedelta(minutes=30)).strftime("%-I:%M %p")  # Add 30 min to end
-                    formatted_calendar += f"  • {start_time} - {end_time}\n"
+                    
+                    # Add timezone indicator to make it clear
+                    if group[0].dst():
+                        tz_name = "PDT"  # Pacific Daylight Time
+                    else:
+                        tz_name = "PST"  # Pacific Standard Time
+                    
+                    formatted_calendar += f"  • {start_time} - {end_time} {tz_name}\n"
             else:
                 formatted_calendar += "  • No free times\n"
                 
