@@ -530,9 +530,123 @@ async def db_test(ctx):
     except Exception as e:
         await ctx.send(f"❌ Database error: {type(e).__name__}: {str(e)}")
 
+# First, let's create a helper function to get a user's free time
+async def get_user_free_periods(user_id, access_token, start_date, end_date, days_ahead):
+    """Get free time periods for a user"""
+    # Format dates for Cronofy
+    from_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    # Get events from Cronofy
+    status, response_text = await agent.cronofy_api_call(
+        endpoint="v1/events",
+        auth_token=access_token,
+        params={
+            "tzid": "UTC",
+            "from": from_str,
+            "to": to_str,
+            "include_managed": "true"
+        }
+    )
+    
+    if status != 200:
+        print(f"Error getting events for user {user_id}: {status}")
+        return []
+    
+    # Parse response
+    response_data = json.loads(response_text)
+    events = response_data.get("events", [])
+    
+    # Create a list of busy periods with start and end times
+    busy_periods = []
+    for event in events:
+        try:
+            start_str = event.get("start", "")
+            end_str = event.get("end", "")
+            
+            # Parse ISO times to datetime objects
+            start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            
+            busy_periods.append((start_time, end_time))
+        except Exception as e:
+            print(f"Error parsing event time: {e}")
+    
+    # Sort busy periods by start time
+    busy_periods.sort(key=lambda x: x[0])
+    
+    # Calculate free periods between busy periods
+    free_periods = []
+    
+    # Set time boundaries
+    pacific = pytz.timezone("America/Los_Angeles")
+    
+    # Get current time in Pacific
+    now = datetime.now(pacific)
+    
+    # Loop through each day
+    for day_offset in range(days_ahead):
+        # Calculate the day we're looking at
+        target_day = (now + timedelta(days=day_offset)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        
+        # For today, start at current time or 6AM, whichever is later
+        if day_offset == 0:
+            current_hour = now.hour
+            current_minute = now.minute
+            
+            if current_hour < 6:
+                time_start = target_day.replace(hour=6, minute=0)
+            else:
+                time_start = now
+        else:
+            # For future days, start at 6AM
+            time_start = target_day.replace(hour=6, minute=0)
+        
+        # End at 9PM
+        time_end = target_day.replace(hour=21, minute=0)
+        
+        # Filter busy periods for this day
+        day_busy_periods = [
+            (s, e) for s, e in busy_periods 
+            if s.date() == target_day.date() or e.date() == target_day.date()
+        ]
+        
+        # If no busy periods for this day, the whole day is free
+        if not day_busy_periods:
+            free_periods.append((time_start, time_end))
+            continue
+        
+        # Calculate free time between busy periods for this day
+        last_end_time = time_start
+        
+        for busy_start, busy_end in day_busy_periods:
+            # Convert to Pacific time for comparison
+            busy_start_local = busy_start.astimezone(pacific)
+            busy_end_local = busy_end.astimezone(pacific)
+            
+            # Skip events outside our 6AM-9PM window
+            if busy_end_local <= time_start or busy_start_local >= time_end:
+                continue
+            
+            # If busy period starts after our last endpoint, we have free time
+            if busy_start_local > last_end_time:
+                free_periods.append((last_end_time, busy_start_local))
+            
+            # Update the last end time, taking the maximum
+            last_end_time = max(last_end_time, busy_end_local)
+        
+        # Add any remaining time at the end of the day
+        if last_end_time < time_end:
+            free_periods.append((last_end_time, time_end))
+    
+    return free_periods
+
+# Now let's update the find_time command to use this function
 @bot.command(name="findtime", aliases=["schedule", "meet"])
 async def find_time(ctx, *, participants_and_options=None):
-    """Find available meeting times between registered users
+    """Find overlapping free time between users
     
     Usage: !findtime @user1 @user2 [options]
     Options (optional):
@@ -556,12 +670,11 @@ async def find_time(ctx, *, participants_and_options=None):
     # Check that all participants are registered
     unregistered_users = []
     participant_tokens = {}
-    participant_profile_ids = []
     
     # Loading message
-    loading_msg = await ctx.send(f"🔍 Finding available times for {len(participants)} participants...")
+    loading_msg = await ctx.send(f"🔍 Finding common free time for {len(participants)} participants...")
     
-    # Get tokens and profile IDs for all participants
+    # Get tokens for all participants
     for user in participants:
         user_data = await agent.db.get_user(str(user.id))
         if not user_data or not user_data.get("access_token"):
@@ -591,38 +704,8 @@ async def find_time(ctx, *, participants_and_options=None):
                     unregistered_users.append(user.mention)
                     continue
             
-            # Get Cronofy profile ID
-            try:
-                status, userinfo_response = await agent.cronofy_api_call(
-                    endpoint="v1/userinfo",
-                    auth_token=user_data.get("access_token")
-                )
-                
-                if status != 200:
-                    print(f"Failed to get userinfo: {status}")
-                    unregistered_users.append(user.mention)
-                    continue
-                
-                userinfo = json.loads(userinfo_response)
-                cronofy_sub = userinfo.get("sub")
-                
-                if not cronofy_sub:
-                    print(f"No sub ID in userinfo for {user.display_name}")
-                    unregistered_users.append(user.mention)
-                    continue
-                
-                # Store the access token and profile ID
-                participant_tokens[str(user.id)] = user_data.get("access_token")
-                participant_profile_ids.append({
-                    "sub": cronofy_sub
-                })
-                
-                print(f"Found Cronofy profile ID for {user.display_name}: {cronofy_sub}")
-                
-            except Exception as e:
-                print(f"Error getting user profile: {e}")
-                unregistered_users.append(user.mention)
-                continue
+            # Store the access token
+            participant_tokens[str(user.id)] = user_data.get("access_token")
     
     # If any users aren't registered, notify and exit
     if unregistered_users:
@@ -635,7 +718,7 @@ async def find_time(ctx, *, participants_and_options=None):
         return
     
     # Parse options
-    duration = 30  # Default 30 minute meetings
+    min_duration = 30  # Default 30 minute meetings
     days_ahead = 3  # Default look 3 days ahead
     
     if participants_and_options:
@@ -643,7 +726,7 @@ async def find_time(ctx, *, participants_and_options=None):
         for option in options_text:
             if "duration=" in option:
                 try:
-                    duration = int(option.split("=")[1])
+                    min_duration = int(option.split("=")[1])
                 except:
                     pass
             if "days=" in option:
@@ -652,124 +735,152 @@ async def find_time(ctx, *, participants_and_options=None):
                 except:
                     pass
     
-    # Prepare query periods with proper RFC3339 format
+    # Set start and end dates for the search period
     now = datetime.now(pytz.timezone("America/Los_Angeles"))
-    
-    # Start 30 min from now (using your system's current time)
-    start_date = now + timedelta(minutes=30)
+    start_date = now
     end_date = now + timedelta(days=days_ahead)
     
-    # Format in strict RFC3339 format
-    start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # Get free periods for each participant
+    all_free_periods = {}
+    for user in participants:
+        user_id = str(user.id)
+        if user_id in participant_tokens:
+            free_periods = await get_user_free_periods(
+                user_id, 
+                participant_tokens[user_id],
+                start_date,
+                end_date,
+                days_ahead
+            )
+            all_free_periods[user_id] = free_periods
     
-    try:
-        # Build availability request with proper RFC3339 dates
-        availability_data = {
-            "participants": [
-                {
-                    "members": participant_profile_ids,
-                    "required": "all"
-                }
-            ],
-            "required_duration": {"minutes": duration},
-            "available_periods": [
-                {
-                    "start": start_str,
-                    "end": end_str
-                }
-            ]
-        }
+    # Find overlapping free time between all participants
+    user_ids = list(all_free_periods.keys())
+    
+    # Start with the first user's free periods
+    if not user_ids or not all_free_periods.get(user_ids[0]):
+        await ctx.send("❌ No free time found for participants.")
+        await loading_msg.delete()
+        return
         
-        # Debug print
-        print("==== AVAILABILITY REQUEST ====")
-        print(json.dumps(availability_data, indent=2))
-        print("=============================")
+    common_free_periods = all_free_periods[user_ids[0]]
+    
+    # Intersect with each subsequent user's free periods
+    for i in range(1, len(user_ids)):
+        user_id = user_ids[i]
+        user_free_periods = all_free_periods.get(user_id, [])
         
-        # Make the API call using first participant's token
-        first_token = list(participant_tokens.values())[0]
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {first_token}"
-        }
+        # Calculate intersection with previous common free periods
+        new_common_periods = []
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.cronofy.com/v1/availability", 
-                headers=headers,
-                json=availability_data
-            ) as response:
-                response_text = await response.text()
+        for period1 in common_free_periods:
+            for period2 in user_free_periods:
+                # Find overlap between periods
+                overlap_start = max(period1[0], period2[0])
+                overlap_end = min(period1[1], period2[1])
                 
-                # Debug print
-                print("==== AVAILABILITY RESPONSE ====")
-                print(f"Status: {response.status}")
-                print(response_text)
-                print("=============================")
-                
-                if response.status == 200:
-                    result = json.loads(response_text)
-                    available_slots = result.get("slots", [])
-                    
-                    if not available_slots:
-                        await ctx.send(f"❌ No common availability found in the next {days_ahead} days for a {duration} minute meeting.")
-                    else:
-                        # Format available slots
-                        slot_text = format_available_slots(available_slots)
-                        
-                        # Show results
-                        participant_names = [p.display_name for p in participants]
-                        names_text = ", ".join(participant_names)
-                        
-                        embed = discord.Embed(
-                            title=f"📅 Available Meeting Times",
-                            description=f"Common availability for: {names_text}\nFor a {duration} minute meeting:",
-                            color=discord.Color.green()
-                        )
-                        
-                        embed.add_field(name="Available Slots", value=slot_text, inline=False)
-                        embed.set_footer(text="To schedule, copy a time and create a calendar event")
-                        
-                        await ctx.send(embed=embed)
-                else:
-                    await ctx.send(f"❌ Error finding availability: {response.status} - {response_text[:100]}")
-    except Exception as e:
-        await ctx.send(f"❌ Error checking availability: {str(e)}")
-        print(f"Availability API error: {e}")
+                # If there's a valid overlap, add it
+                if overlap_start < overlap_end:
+                    # Check if the overlap is long enough
+                    duration = (overlap_end - overlap_start).total_seconds() / 60
+                    if duration >= min_duration:
+                        new_common_periods.append((overlap_start, overlap_end))
+        
+        # Update common free periods
+        common_free_periods = new_common_periods
+        
+        # If no common periods found, exit early
+        if not common_free_periods:
+            break
     
-    # Delete loading message
-    await loading_msg.delete()
-
-def format_available_slots(slots):
-    """Format available time slots into readable text"""
-    if not slots:
-        return "No available slots found."
+    # Format results
+    if not common_free_periods:
+        await ctx.send(f"⛔ No common free time found for all {len(participants)} participants.")
+        await loading_msg.delete()
+        return
     
-    formatted_text = ""
+    # Sort by start time
+    common_free_periods.sort(key=lambda x: x[0])
+    
+    # Merge adjacent or overlapping periods
+    merged_periods = []
+    if common_free_periods:
+        current_start, current_end = common_free_periods[0]
+        
+        for start, end in common_free_periods[1:]:
+            # If this period starts after current_end (with a small buffer)
+            if start > current_end + timedelta(minutes=5):
+                # Add the current period and start a new one
+                merged_periods.append((current_start, current_end))
+                current_start, current_end = start, end
+            else:
+                # Extend the current period
+                current_end = max(current_end, end)
+        
+        # Add the last period
+        merged_periods.append((current_start, current_end))
+    
+    # Create embed for display
+    embed = discord.Embed(
+        title=f"📅 Common Free Time",
+        description=f"Found times when all {len(participants)} participants are available:",
+        color=discord.Color.green()
+    )
+    
+    # Format the time slots for display
+    slots_text = ""
     current_day = None
     
-    for slot in slots:
-        # Updated to work with new format from Cronofy slots format
-        start_time = datetime.fromisoformat(slot["start"].replace("Z", "+00:00"))
-        end_time = datetime.fromisoformat(slot["end"].replace("Z", "+00:00"))
+    for start, end in merged_periods:
+        # Get date for grouping
+        day_str = start.strftime("%Y-%m-%d")
         
-        # Convert to local time (Pacific Time)
-        pacific = pytz.timezone("America/Los_Angeles")
-        local_start = start_time.astimezone(pacific)
-        local_end = end_time.astimezone(pacific)
-        
-        # Check if this is a new day
-        day_str = local_start.strftime("%A, %B %d")
         if day_str != current_day:
             current_day = day_str
-            formatted_text += f"\n**{day_str}**\n"
+            # Add day header
+            day_header = start.strftime("%A, %B %d")
+            slots_text += f"\n**{day_header}**\n"
         
-        # Format the time slot
-        start_str = local_start.strftime("%-I:%M %p")
-        end_str = local_end.strftime("%-I:%M %p %Z")
-        formatted_text += f"• {start_str} - {end_str}\n"
+        # Format times
+        start_time_str = start.strftime("%-I:%M %p")
+        end_time_str = end.strftime("%-I:%M %p")
+        
+        # Calculate duration
+        duration = (end - start).total_seconds() / 60
+        hours = int(duration // 60)
+        minutes = int(duration % 60)
+        
+        # Build the text
+        slot_text = f"• {start_time_str} to {end_time_str}"
+        if hours > 0:
+            slot_text += f" ({hours}h"
+            if minutes > 0:
+                slot_text += f" {minutes}m"
+            slot_text += ")"
+        else:
+            slot_text += f" ({minutes}m)"
+            
+        slots_text += slot_text + "\n"
     
-    return formatted_text
+    # Add participants field
+    participants_text = "\n".join([f"• {user.display_name}" for user in participants])
+    embed.add_field(
+        name="Participants",
+        value=participants_text,
+        inline=False
+    )
+    
+    # Add available slots field
+    embed.add_field(
+        name="📆 Available Meeting Times",
+        value=slots_text.strip(),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Minimum duration: {min_duration} minutes")
+    
+    await ctx.send(embed=embed)
+    await loading_msg.delete()
 
 @bot.command(name="freetime")
 async def free_time(ctx, username=None):
