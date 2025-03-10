@@ -378,15 +378,15 @@ class MistralAgent:
         # Filter out the bot itself from mentioned_users before processing
         mentioned_users = [user for user in mentioned_users if user.id != self.bot.user.id]
         
-        # Prepare more comprehensive prompt for Mistral
+        # Prepare more comprehensive prompt for Mistral with stronger emphasis on date detection
         prompt = f"""
         You are a scheduling assistant for a Discord bot called Skedge. Analyze this message and determine:
         1. What is the user's intent? (schedule_meeting, view_calendar, check_free_time, get_help, register)
         2. Who is involved? (the message author or mentioned people)
-        3. Any time parameters mentioned:
+        3. IMPORTANT: Look for ANY time and date parameters mentioned:
            - Duration (e.g., 30 minutes, 1 hour)
+           - Specific dates/day references (e.g., tomorrow, next Monday, this weekend, May 15th)
            - Days ahead (e.g., next 3 days)
-           - Specific dates/times (e.g., tomorrow, next Monday, this weekend, afternoon)
            - Time of day references (morning, afternoon, evening)
         
         Message: {message_content}
@@ -401,6 +401,8 @@ class MistralAgent:
             "time_of_day": optional string (e.g., "morning", "afternoon", "evening"),
             "specific_date": optional date in YYYY-MM-DD format if a specific date was mentioned
         }}
+        
+        Be particularly thorough in identifying date references. For example, if the message mentions "Friday", that should be included in date_reference. If it mentions a specific date like "May 15th", convert it to YYYY-MM-DD format in specific_date.
         """
         
         # Call Mistral API
@@ -409,6 +411,7 @@ class MistralAgent:
         try:
             # Parse the JSON response
             parsed_response = json.loads(response)
+            print(f"Mistral parsed: {parsed_response}")  # Add logging to see what Mistral detected
             
             # Route to appropriate command based on intent
             if parsed_response["intent"] == "schedule_meeting":
@@ -452,23 +455,31 @@ class MistralAgent:
             for user in mentioned_users:
                 command += f" {user.mention}"
         
-        # Add duration if specified
+        # Add duration if specified with validation
         if "duration_minutes" in parsed_response and parsed_response["duration_minutes"]:
-            command += f" duration={parsed_response['duration_minutes']}"
+            duration = parsed_response["duration_minutes"]
+            # Sanitize duration (between 5 and 240 minutes)
+            if isinstance(duration, (int, float)):
+                duration = max(5, min(240, int(duration)))
+                command += f" duration={duration}"
         
-        # Add days_ahead if specified
+        # Add days_ahead if specified with validation
         if "days_ahead" in parsed_response and parsed_response["days_ahead"]:
-            command += f" days={parsed_response['days_ahead']}"
+            days = parsed_response["days_ahead"]
+            # Sanitize days (between 1 and 14 days)
+            if isinstance(days, (int, float)):
+                days = max(1, min(14, int(days)))
+                command += f" days={days}"
         
-        # Add date_reference if specified (custom parameter)
+        # Add date_reference if specified
         if "date_reference" in parsed_response and parsed_response["date_reference"]:
             command += f" date={parsed_response['date_reference']}"
         
-        # Add time_of_day if specified (custom parameter)
+        # Add time_of_day if specified
         if "time_of_day" in parsed_response and parsed_response["time_of_day"]:
             command += f" time={parsed_response['time_of_day']}"
         
-        # Add specific_date if specified (custom parameter)
+        # Add specific_date if specified
         if "specific_date" in parsed_response and parsed_response["specific_date"]:
             command += f" date={parsed_response['specific_date']}"
         

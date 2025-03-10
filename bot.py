@@ -347,7 +347,8 @@ async def help_command(ctx):
             "`!viewcal` or `!cal` - View your calendar for the week\n"
             "`!viewcal @user` - View another user's calendar (if they're registered)\n"
             "`!freetime` - Show your available time slots (6AM-9PM, next 3 days)\n"
-            "`!freetime @user` - Show available time slots for another user"
+            "`!freetime @user` - Show available time slots for another user\n"
+            "`!freetime @user date=tomorrow` - Check availability for specific date"
         ),
         inline=False
     )
@@ -369,6 +370,8 @@ async def help_command(ctx):
         value=(
             "Mention the bot (@Skedge) in your message to ask any scheduling question:\n"
             "• @Skedge Find time to meet with @user\n"
+            "• @Skedge When is @user free tomorrow?\n"
+            "• @Skedge Show my calendar for next week"
         ),
         inline=False
     )
@@ -384,19 +387,22 @@ async def help_command(ctx):
             inline=False
         )
     
-    # Add a section for default values and tips
+    # Add a section for default values and tips - UPDATED with limitations
     embed.add_field(
-        name="Default Settings",
+        name="Default Settings & Limitations",
         value=(
             "• Business hours: 6:00 AM - 9:00 PM\n"
-            "• Scheduling window: Next 3 days\n"
-            "• Minimum meeting duration: 30 minutes\n"
-            "• Minimum free time slot: 15 minutes"
+            "• Default scheduling window: Next 3 days\n"
+            "• Default meeting duration: 30 minutes\n"
+            "• Minimum free time slot: 15 minutes\n"
+            "• **Duration limits**: 5 minutes minimum, 4 hours (240 min) maximum\n"
+            "• **Days ahead limit**: 14 days maximum\n"
+            "• **Date references**: today, tomorrow, next Monday, weekend, etc."
         ),
         inline=False
     )
     
-    embed.set_footer(text="Made with ❤️ by the Skedge team")
+    embed.set_footer(text="Made with ❤️ by the Skedge team | Powered by Mistral AI")
     await ctx.send(embed=embed)
 
 @bot.command(name="viewcal", aliases=["calendar", "cal"])
@@ -924,6 +930,7 @@ async def find_time(ctx, *args):
     # Parse arguments
     min_duration = 30  # Default: 30 minute slots
     days_ahead = 3     # Default: Look ahead 3 days
+    specific_date = None  # For when a specific date is mentioned
     
     # Extract parameters
     mentions = ctx.message.mentions
@@ -935,20 +942,62 @@ async def find_time(ctx, *args):
         if arg.startswith("duration="):
             try:
                 min_duration = int(arg.split("=")[1])
+                # Set reasonable limits for duration
+                if min_duration < 5:
+                    await ctx.send("⚠️ Minimum duration set to 5 minutes.")
+                    min_duration = 5
+                elif min_duration > 240:  # 4 hours max
+                    await ctx.send("⚠️ Maximum duration limited to 4 hours (240 minutes).")
+                    min_duration = 240
             except ValueError:
-                await ctx.send("❌ Invalid duration format. Use `duration=30` for 30 minutes.")
-                return
+                await ctx.send("❌ Invalid duration format. Using default of 30 minutes.")
+                min_duration = 30
             
         # Check for days parameter
         elif arg.startswith("days="):
             try:
                 days_ahead = int(arg.split("=")[1])
-                if days_ahead > 14:
-                    await ctx.send("❌ Maximum days ahead is 14.")
-                    return
+                # Validate days_ahead
+                if days_ahead < 1:
+                    await ctx.send("⚠️ Minimum days ahead set to 1.")
+                    days_ahead = 1
+                elif days_ahead > 14:
+                    await ctx.send("⚠️ Maximum days ahead limited to 14.")
+                    days_ahead = 14
             except ValueError:
-                await ctx.send("❌ Invalid days format. Use `days=7` for 7 days.")
-                return
+                await ctx.send("❌ Invalid days format. Using default of 3 days.")
+                days_ahead = 3
+        
+        # Check for date parameter (from Mistral)
+        elif arg.startswith("date="):
+            date_value = arg.split("=")[1].lower()
+            
+            # Process the date parameter just like in the freetime command
+            if date_value == "today":
+                days_ahead = 0
+            elif date_value == "tomorrow":
+                days_ahead = 1
+            elif date_value in ["day after tomorrow", "dayaftertomorrow"]:
+                days_ahead = 2
+            elif date_value.startswith("next"):
+                # Handle "next monday", "next week", etc.
+                if "week" in date_value:
+                    days_ahead = 7
+                elif any(day in date_value for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]):
+                    # Calculate days until next specified weekday
+                    target_day = next((day for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] if day in date_value), None)
+                    if target_day:
+                        current_weekday = datetime.now().weekday()
+                        target_weekday = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}[target_day]
+                        days_ahead = (target_weekday - current_weekday) % 7
+                        if days_ahead == 0:  # If today is the target day, go to next week
+                            days_ahead = 7
+                else:
+                    days_ahead = 7  # Default to next week
+            elif date_value in ["weekend", "this weekend"]:
+                # Calculate days until weekend
+                current_weekday = datetime.now().weekday()
+                days_ahead = (5 - current_weekday) % 7  # Days until Saturday
     
     # Include the message author by default
     participants.append(ctx.author)
@@ -1182,6 +1231,7 @@ async def free_time(ctx, username=None, date=None, time=None):
     
     # Process date parameter
     days_to_add = 0
+    max_days_ahead = 14  # Maximum days to look ahead
     
     if date:
         # Handle common date references
@@ -1211,6 +1261,11 @@ async def free_time(ctx, username=None, date=None, time=None):
             # Calculate days until weekend
             current_weekday = datetime.now().weekday()
             days_to_add = (5 - current_weekday) % 7  # Days until Saturday
+            
+    # Validate days_to_add doesn't exceed maximum
+    if days_to_add > max_days_ahead:
+        await ctx.send(f"⚠️ Looking too far ahead! Limited to {max_days_ahead} days maximum.")
+        days_to_add = max_days_ahead
     
     # Calculate dates
     start_date = datetime.now() + timedelta(days=days_to_add)
