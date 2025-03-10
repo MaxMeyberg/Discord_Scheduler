@@ -282,3 +282,38 @@ class MistralAgent:
             await self.session.close()
             self.session = None
             print("Closed aiohttp session")
+
+    async def call_mistral_api(self, prompt, max_tokens=500, temperature=0.7):
+        """Call Mistral API with a prompt and return the generated text"""
+        mistral_api_key = os.getenv("MISTRAL_API_KEY")
+        if not mistral_api_key:
+            return "Mistral API key not found in environment variables."
+        
+        try:
+            url = "https://api.mistral.ai/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {mistral_api_key}"
+            }
+            
+            payload = {
+                "model": "mistral-medium",  # Use the appropriate model
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        error_text = await response.text()
+                        print(f"Mistral API error: {response.status} - {error_text}")
+                        return f"API error: {response.status}"
+        except Exception as e:
+            print(f"Exception calling Mistral API: {e}")
+            return f"Error: {str(e)}"

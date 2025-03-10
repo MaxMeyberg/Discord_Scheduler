@@ -58,17 +58,154 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     """Process incoming messages"""
-    # Process commands
+    # First process commands normally (to handle standard commands)
     await bot.process_commands(message)
     
-    # Ignore bot messages
-    if message.author.bot:
+    # If the message doesn't mention the bot or is from the bot, ignore it
+    if bot.user not in message.mentions or message.author == bot.user:
         return
     
-    # Handle registration DMs
-    if isinstance(message.channel, discord.DMChannel) and not message.content.startswith(PREFIX):
-        await agent.process_registration_dm(message)
+    # Get user data to check if registered
+    user_data = await agent.db.get_user(str(message.author.id))
+    if not user_data or not user_data.get("access_token"):
+        await message.channel.send(f"❌ {message.author.mention}, you need to connect your calendar first using `!register`")
         return
+    
+    # Remove the bot mention from the message content
+    query = message.content.replace(f"<@{bot.user.id}>", "").strip()
+    if not query:
+        # If no actual query was provided, show options
+        await message.channel.send(f"👋 Hi {message.author.mention}! You can ask me about your calendar or scheduling. Try:\n"
+                                  "• When am I free tomorrow?\n"
+                                  "• Find a time to meet with @user\n"
+                                  "• Show me my calendar for this week")
+        return
+    
+    # Loading message
+    loading_msg = await message.channel.send("🤔 Analyzing your request...")
+    
+    # Get calendar context for AI
+    now = datetime.now()
+    past_date = now - timedelta(days=1)
+    future_date = now + timedelta(days=5)
+    
+    from_str = past_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_str = future_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    # Get user's events for context
+    status, response_text = await agent.cronofy_api_call(
+        endpoint="v1/events",
+        auth_token=user_data.get("access_token"),
+        params={
+            "tzid": "UTC",
+            "from": from_str,
+            "to": to_str,
+            "include_managed": "true"
+        }
+    )
+    
+    events_context = ""
+    if status == 200:
+        response_data = json.loads(response_text)
+        events = response_data.get("events", [])
+        
+        # Format events as context (up to 5 events)
+        if events:
+            events_list = []
+            for event in events[:5]:
+                start = event.get("start", "Unknown")
+                end = event.get("end", "Unknown")
+                summary = event.get("summary", "Meeting")
+                events_list.append(f"- {summary}: {start} to {end}")
+            
+            events_context = "Your upcoming events:\n" + "\n".join(events_list)
+    
+    # Check if any users are mentioned
+    mentioned_users = []
+    for user in message.mentions:
+        if user != bot.user:  # Skip the bot mention
+            mentioned_users.append(user.display_name)
+            
+    # Build prompt for Mistral AI
+    prompt = f"""You are Skedge, a Discord calendar assistant. Analyze this request and determine the best command to run.
+
+USER: {message.author.display_name}
+REQUEST: {query}
+MENTIONED USERS: {', '.join(mentioned_users) if mentioned_users else 'None'}
+CURRENT TIME: {now.strftime('%A, %B %d, %Y at %I:%M %p')}
+
+{events_context}
+
+These are the commands available in Skedge:
+1. !viewcal - Shows a user's calendar for the week
+2. !freetime - Shows when a user is available (6AM-9PM)
+3. !findtime @user - Finds overlapping free time between users
+4. !register - Connects Google Calendar to Skedge
+5. !help - Shows available commands
+
+Based on the user's request, determine:
+1. Which command would best answer their request
+2. What parameters should be included
+3. A brief explanation of why this is the right command
+
+Return your response in this JSON format:
+{{"command": "command_name", "parameters": "parameters", "explanation": "why this command"}}
+
+For example:
+{{"command": "findtime", "parameters": "@user duration=30", "explanation": "This will find 30-minute slots when both you and the mentioned user are free."}}
+
+If the request doesn't map to a specific command, use "none" as the command and explain how you can help.
+"""
+    
+    # Call Mistral API
+    ai_response = await agent.call_mistral_api(prompt, max_tokens=500, temperature=0.3)
+    
+    try:
+        # Parse the JSON response
+        response_data = json.loads(ai_response)
+        command = response_data.get("command", "none")
+        parameters = response_data.get("parameters", "")
+        explanation = response_data.get("explanation", "")
+        
+        # Create a nice embed for the response
+        embed = discord.Embed(
+            title="📅 Skedge Assistant",
+            description=explanation,
+            color=discord.Color.purple()
+        )
+        
+        # If there's a specific command recommendation
+        if command != "none":
+            full_command = f"!{command} {parameters}".strip()
+            embed.add_field(
+                name="Suggested Command",
+                value=f"`{full_command}`",
+                inline=False
+            )
+            
+            # Add a shortcut button (this will be a clickable link that puts the command in chat)
+            embed.add_field(
+                name="Quick Action",
+                value=f"Type `{full_command}` or ask me to run it for you.",
+                inline=False
+            )
+        
+        embed.set_footer(text="Powered by Mistral AI")
+        
+        # Delete loading message and send response
+        await loading_msg.delete()
+        await message.channel.send(embed=embed)
+        
+    except json.JSONDecodeError:
+        # If AI response isn't valid JSON, send a fallback response
+        await loading_msg.delete()
+        embed = discord.Embed(
+            title="📅 Skedge Assistant",
+            description=f"I'm not sure how to help with that. Try using `!help` to see available commands.",
+            color=discord.Color.purple()
+        )
+        await message.channel.send(embed=embed)
+        print(f"Invalid AI response: {ai_response}")
 
 @bot.command(name="help")
 async def help_command(ctx):
@@ -95,7 +232,8 @@ async def help_command(ctx):
         value=(
             "`!viewcal` or `!cal` - View your calendar for the week\n"
             "`!viewcal @user` - View another user's calendar (if they're registered)\n"
-            "`!freetime` - Check your busy periods directly from calendar"
+            "`!freetime` - Show your available time slots (6AM-9PM, next 3 days)\n"
+            "`!freetime @user` - Show available time slots for another user"
         ),
         inline=False
     )
@@ -103,10 +241,22 @@ async def help_command(ctx):
     embed.add_field(
         name="Scheduling",
         value=(
-            "`!findtime @user` - Find available meeting times (default: next 3 days, 30 min)\n"
-            "`!findtime @user duration=15` - Find 15-minute meeting slots\n"
-            "`!findtime @user days=7` - Look ahead 7 days instead of 3\n"
+            "`!findtime @user` - Find overlapping free time between you and mentioned users\n"
+            "`!findtime @user duration=15` - Find common free slots of at least 15 minutes\n"
+            "`!findtime @user days=7` - Look ahead 7 days instead of the default 3 days\n"
             "`!findtime @user1 @user2 duration=15 days=7` - Multiple users with options"
+        ),
+        inline=False
+    )
+    
+    # Add AI Assistant section - updated for mentions
+    embed.add_field(
+        name="AI Calendar Assistant",
+        value=(
+            "Mention the bot (@Skedge) in your message to ask any scheduling question:\n"
+            "• @Skedge When am I free tomorrow?\n"
+            "• @Skedge Find time to meet with @user\n"
+            "• @Skedge Show me my calendar"
         ),
         inline=False
     )
@@ -121,6 +271,18 @@ async def help_command(ctx):
             ),
             inline=False
         )
+    
+    # Add a section for default values and tips
+    embed.add_field(
+        name="Default Settings",
+        value=(
+            "• Business hours: 6:00 AM - 9:00 PM\n"
+            "• Scheduling window: Next 3 days\n"
+            "• Minimum meeting duration: 30 minutes\n"
+            "• Minimum free time slot: 15 minutes"
+        ),
+        inline=False
+    )
     
     embed.set_footer(text="Made with ❤️ by the Skedge team")
     await ctx.send(embed=embed)
