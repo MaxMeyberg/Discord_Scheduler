@@ -6,17 +6,33 @@ from supabase import create_client
 import asyncio
 from dotenv import load_dotenv
 import uuid
+import logging
+
+def get_env_variable(var_name):
+    # First try AWS Parameter Store if boto3 is available
+    try:
+        import boto3
+        ssm = boto3.client('ssm', region_name='us-east-1')  # Change region as needed
+        try:
+            response = ssm.get_parameter(Name=f'/schedge/{var_name}', WithDecryption=True)
+            return response['Parameter']['Value']
+        except Exception as e:
+            logging.warning(f"Could not get parameter from AWS: {e}")
+    except ImportError:
+        logging.info("boto3 not available, using local environment")
+    
+    # Fall back to local .env file
+    if os.path.exists('.env'):
+        load_dotenv()
+    return os.environ.get(var_name)
 
 class Database:
     """Database class using Supabase as the backend."""
     
     def __init__(self):
         """Initialize Supabase connection."""
-        # Explicitly load environment variables
-        load_dotenv()
-        
-        self.supabase_url = os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("SUPABASE_KEY")
+        self.supabase_url = get_env_variable("SUPABASE_URL")
+        self.supabase_key = get_env_variable("SUPABASE_KEY")
         
         if not self.supabase_url or not self.supabase_key:
             print(f"ERROR: Supabase credentials not found in environment variables.")

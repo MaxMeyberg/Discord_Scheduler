@@ -1,5 +1,28 @@
-# Python-generated files
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python-generated files
 *.py[oc]
 build/
 dist/

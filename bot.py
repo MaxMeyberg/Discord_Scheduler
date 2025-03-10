@@ -14,8 +14,30 @@ import re
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('discord')
 
+# Setup for both local development and AWS deployment
+def get_env_variable(var_name):
+    # First try AWS Parameter Store if boto3 is available
+    try:
+        import boto3
+        ssm = boto3.client('ssm', region_name='us-east-1')  # Change region as needed
+        try:
+            response = ssm.get_parameter(Name=f'/schedge/{var_name}', WithDecryption=True)
+            return response['Parameter']['Value']
+        except Exception as e:
+            logging.warning(f"Could not get parameter from AWS: {e}")
+    except ImportError:
+        logging.info("boto3 not available, using local environment")
+    
+    # Fall back to local .env file
+    if os.path.exists('.env'):
+        load_dotenv()
+    return os.environ.get(var_name)
+
+# Load environment variables using the new function
+DISCORD_TOKEN = get_env_variable('DISCORD_TOKEN')
+MISTRAL_API_KEY = get_env_variable('MISTRAL_API_KEY')
+
 # Load environment variables and setup bot
-load_dotenv()
 PREFIX = "!"
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
@@ -1453,4 +1475,4 @@ async def free_time(ctx, username=None, date=None, time=None):
 
 # Run the bot
 if __name__ == "__main__":
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    bot.run(DISCORD_TOKEN)

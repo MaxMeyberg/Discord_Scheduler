@@ -7,6 +7,8 @@ import aiohttp
 import traceback
 import pytz
 import urllib.parse
+import logging
+from dotenv import load_dotenv
 
 # For URL shortening if available
 try:
@@ -15,6 +17,25 @@ try:
 except ImportError:
     HAS_SHORTENER = False
     print("Warning: pyshorteners not found - using full URLs instead")
+
+# Add the AWS Parameter Store function
+def get_env_variable(var_name):
+    # First try AWS Parameter Store if boto3 is available
+    try:
+        import boto3
+        ssm = boto3.client('ssm', region_name='us-east-1')  # Change region as needed
+        try:
+            response = ssm.get_parameter(Name=f'/schedge/{var_name}', WithDecryption=True)
+            return response['Parameter']['Value']
+        except Exception as e:
+            logging.warning(f"Could not get parameter from AWS: {e}")
+    except ImportError:
+        logging.info("boto3 not available, using local environment")
+    
+    # Fall back to local .env file
+    if os.path.exists('.env'):
+        load_dotenv()
+    return os.environ.get(var_name)
 
 class MistralAgent:
     def __init__(self, bot=None):
@@ -31,9 +52,11 @@ class MistralAgent:
         # Registration state tracking
         self.registration_states = {}
         
-        # Cronofy configuration
-        self.cronofy_client_id = os.getenv("CRONOFY_CLIENT_ID")
-        self.cronofy_redirect_uri = os.getenv("CRONOFY_REDIRECT_URI", "https://oauth.pstmn.io/v1/callback")
+        # Get credentials from AWS or .env
+        self.mistral_api_key = get_env_variable('MISTRAL_API_KEY')
+        self.cronofy_client_id = get_env_variable('CRONOFY_CLIENT_ID')
+        self.cronofy_client_secret = get_env_variable('CRONOFY_CLIENT_SECRET')
+        self.cronofy_redirect_uri = get_env_variable('CRONOFY_REDIRECT_URI')
         
         # User database cache
         self.user_database = {}
@@ -173,20 +196,13 @@ class MistralAgent:
     async def exchange_code_for_token(self, code):
         """Exchange authorization code for access token"""
         try:
-            # Get client secret from environment variables
-            client_secret = os.getenv("CRONOFY_CLIENT_SECRET")
-            
-            if not client_secret:
-                print("ERROR: CRONOFY_CLIENT_SECRET not found in environment variables")
-                return None
-            
             # Make the token exchange request
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     "https://api.cronofy.com/oauth/token",
                     data={
                         "client_id": self.cronofy_client_id,
-                        "client_secret": client_secret,
+                        "client_secret": self.cronofy_client_secret,
                         "grant_type": "authorization_code",
                         "code": code,
                         "redirect_uri": self.cronofy_redirect_uri
@@ -308,8 +324,7 @@ class MistralAgent:
 
     async def call_mistral_api(self, prompt, max_tokens=500, temperature=0.7, timeout=30):
         """Call Mistral API with a prompt and return the generated text"""
-        mistral_api_key = os.getenv("MISTRAL_API_KEY")
-        if not mistral_api_key:
+        if not self.mistral_api_key:
             print("ERROR: Mistral API key not found in environment variables.")
             return "Mistral API key not found in environment variables."
         
@@ -318,7 +333,7 @@ class MistralAgent:
             url = "https://api.mistral.ai/v1/chat/completions"
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {mistral_api_key}"
+                "Authorization": f"Bearer {self.mistral_api_key}"
             }
             
             payload = {
