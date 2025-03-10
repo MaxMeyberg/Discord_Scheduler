@@ -798,7 +798,7 @@ async def free_time(ctx, username=None):
     to_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
     
     # Loading message
-    loading_msg = await ctx.send(f"🔍 Finding free time slots for {target_user.mention}...")
+    loading_msg = await ctx.send(f"🔍 Finding free time for {target_user.mention}...")
     
     try:
         # Use the events endpoint for calendar data
@@ -835,11 +835,6 @@ async def free_time(ctx, username=None):
             # Sort busy periods by start time
             busy_periods.sort(key=lambda x: x[0])
             
-            if not busy_periods:
-                await ctx.send(f"🎉 {target_user.mention} is completely free for the next 3 days!")
-                await loading_msg.delete()
-                return
-            
             # Calculate free periods between busy periods
             free_periods = []
             
@@ -866,10 +861,10 @@ async def free_time(ctx, username=None):
                     time_start = day_start
                 else:
                     # For future days, start at 9AM
-                    time_start = target_day.replace(hour=9, minute=0)
+                    time_start = target_day.replace(hour=6, minute=0)
                 
                 # End at 5PM
-                time_end = target_day.replace(hour=17, minute=0)
+                time_end = target_day.replace(hour=21, minute=0)
                 
                 # Filter busy periods for this day
                 day_busy_periods = [
@@ -905,46 +900,71 @@ async def free_time(ctx, username=None):
                 if last_end_time < time_end:
                     free_periods.append((last_end_time, time_end))
             
-            # Format the free periods for display
-            free_times = []
+            # Count free time slots
+            slot_count = len(free_periods)
+            
+            if slot_count == 0:
+                await ctx.send(f"❌ No free time found for {target_user.mention} in the next 3 days during business hours (9AM-5PM).")
+                await loading_msg.delete()
+                return
+                
+            # Create embed for the free time display
+            embed = discord.Embed(
+                title=f"📅 Free Time for {target_user.display_name}", 
+                color=discord.Color.blue()
+            )
+            
+            # Create description with the count
+            embed.description = f"Found {slot_count} free time slots in the next 3 days:"
+            
+            # Format free time slots for display - match viewcal style
+            free_times_text = ""
             current_day = None
             
             for start, end in free_periods:
                 # Check if the free period is at least 15 minutes
                 duration = (end - start).total_seconds() / 60
-                if duration < 15:
+                if duration < 15:  # Skip slots shorter than 15 minutes
                     continue
-                    
-                # Format the time slot
-                day_str = start.strftime("%A, %B %d")
                 
-                # Add day header if this is a new day
+                # Get date for grouping
+                day_str = start.strftime("%Y-%m-%d")
+                
                 if day_str != current_day:
                     current_day = day_str
-                    free_times.append(f"\n**{day_str}**")
+                    # Add day header - format it like viewcal does
+                    day_header = start.strftime("%A, %B %d")
+                    free_times_text += f"**{day_header}**\n"
                 
-                # Format the time slot
-                start_str = start.strftime("%-I:%M %p")
-                end_str = end.strftime("%-I:%M %p")
-                free_times.append(f"• {start_str} to {end_str} ({int(duration)} min)")
+                # Format times to match viewcal's format
+                start_time_str = start.strftime("%-I:%M %p")
+                end_time_str = end.strftime("%-I:%M %p")
+                
+                # Build the free time entry with duration
+                slot_text = f"• {start_time_str} to {end_time_str}"
+                hours = int(duration // 60)
+                minutes = int(duration % 60)
+                
+                if hours > 0:
+                    slot_text += f" ({hours}h"
+                    if minutes > 0:
+                        slot_text += f" {minutes}m"
+                    slot_text += ")"
+                else:
+                    slot_text += f" ({minutes}m)"
+                    
+                free_times_text += slot_text + "\n"
             
-            # Create an embed with the free times
-            if free_times:
-                embed = discord.Embed(
-                    title=f"📅 Free Time for {target_user.display_name}",
-                    description="Available time slots in the next 3 days (9AM-5PM):",
-                    color=discord.Color.green()
-                )
-                
-                embed.add_field(
-                    name="Free Time Slots",
-                    value="\n".join(free_times),
-                    inline=False
-                )
-                
-                await ctx.send(embed=embed)
-            else:
-                await ctx.send(f"😔 {target_user.mention} has no free time slots (15+ minutes) in the next 3 days during business hours.")
+            # Use calendar emoji to match viewcal
+            calendar_emoji = "📆"
+            embed.add_field(
+                name=f"{calendar_emoji} Available Time Slots (9AM-5PM)",
+                value=free_times_text if free_times_text else "No qualifying free time slots found.",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
         else:
             await ctx.send(f"❌ Error checking calendar: {status} - {response_text[:100]}")
     except Exception as e:
