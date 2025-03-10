@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import json
 import asyncio
 import pytz
+import aiohttp
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,54 +22,27 @@ PREFIX = "!"
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
-# Import the agent
+# Initialize agent
 agent = MistralAgent(bot)
 
 # Remove default help command
 bot.remove_command('help')
 
-# At the top of your file
+# Admin users list
 ADMIN_USERS = [
-    "maxmeyberg",  # Your Discord ID
+    "maxmeyberg",  
     "maxtonian",
-    "itsalbertom",  # Another admin's Discord ID
+    "itsalbertom", 
 ]
 
-# At the top of the file, add debugging for admin users
+# Simplified admin check function
 def is_admin(member):
     """Check if a member is an admin using their username or display name"""
-    # Print debug info to see the actual values being compared
-    print(f"Admin check for: username='{member.name}', display_name='{member.display_name}'")
-    print(f"Admin list: {ADMIN_USERS}")
-    
-    # Check both username and display_name against the admin list
     is_admin_user = (
         member.name.lower() in [name.lower() for name in ADMIN_USERS] or 
         member.display_name.lower() in [name.lower() for name in ADMIN_USERS]
     )
-    
-    print(f"Is admin result: {is_admin_user}")
     return is_admin_user
-
-# Get the user's timezone - either from .env or their stored preferences
-timezone_str = os.getenv("TIMEZONE", "UTC")
-timezone = pytz.timezone(timezone_str)
-
-# When displaying times to users, convert from UTC to local time with DST awareness
-def format_event_time(utc_time):
-    """Convert UTC time to local time with proper DST handling"""
-    if isinstance(utc_time, str):
-        utc_time = datetime.fromisoformat(utc_time.replace('Z', '+00:00'))
-    
-    # Make sure the time is timezone-aware
-    if utc_time.tzinfo is None:
-        utc_time = pytz.utc.localize(utc_time)
-    
-    # Convert to the user's local timezone
-    local_time = utc_time.astimezone(timezone)
-    
-    # Format for display
-    return local_time.strftime("%I:%M %p")  # e.g., "02:30 PM"
 
 @bot.event
 async def on_ready():
@@ -76,10 +50,15 @@ async def on_ready():
     logger.info(f"{bot.user} has connected to Discord!")
     print(f"Logged in as {bot.user}")
     print(f"Bot is ready with prefix: {PREFIX}")
+    print(f"No cogs loaded - all commands are directly in bot.py")
+    
+    # Set up the agent's session
+    await agent.setup_session()
 
 @bot.event
 async def on_message(message):
     """Process incoming messages"""
+    # Process commands
     await bot.process_commands(message)
     
     # Ignore bot messages
@@ -90,110 +69,8 @@ async def on_message(message):
     if isinstance(message.channel, discord.DMChannel) and not message.content.startswith(PREFIX):
         await agent.process_registration_dm(message)
         return
-    
-    # Check if bot is mentioned in a message
-    if bot.user in message.mentions:
-        # Message content without the mention
-        clean_content = message.content.replace(f'<@{bot.user.id}>', '').strip()
-        
-        # Create a mock message object or modify the agent.run call - choose one approach:
-        
-        # APPROACH 1: Direct API call to Mistral bypassing agent.run
-        system_message = f"""TASK: Parse the following message and extract calendar scheduling intent.
-Message: "{clean_content}"
 
-Extract:
-1. Is this asking for calendar availability or free times? (yes/no)
-2. Which users are mentioned? List their exact @mentions or names.
-3. Is there a specific time period mentioned? (today, tomorrow, this week, next Thursday, etc.)
-
-Format your response as JSON:
-{{
-  "is_scheduling": true/false,
-  "users": ["@user1", "@user2", ...],
-  "time_period": "today"/"tomorrow"/"this week"/null
-}}
-"""
-        
-        # Call Mistral API directly
-        response = await agent.client.chat.complete_async(
-            model="mistral-large-latest",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": clean_content}
-            ]
-        )
-        response_text = response.choices[0].message.content
-        
-        try:
-            # Try to extract JSON from the response
-            import re
-            json_match = re.search(r'```(?:json)?\s*({.*?})\s*```', response_text, re.DOTALL)
-            if json_match:
-                intent_data = json.loads(json_match.group(1))
-            else:
-                # If no JSON block found, try to parse the entire response
-                intent_data = json.loads(response_text)
-                
-            # Process scheduling intent
-            if intent_data.get("is_scheduling", False):
-                # Extract time period
-                time_period = intent_data.get("time_period", "week")
-                
-                # Process mentioned users
-                mentioned_users = []
-                
-                # Extract users from message mentions
-                for user in message.mentions:
-                    if user != bot.user:  # Skip the bot itself
-                        mentioned_users.append(user)
-                
-                # If we didn't find mentions, try to find users by name
-                if not mentioned_users:
-                    guild_members = message.guild.members
-                    for user_name in intent_data.get("users", []):
-                        # Strip @ if present
-                        if user_name.startswith('@'):
-                            user_name = user_name[1:]
-                        
-                        # Find user by name
-                        for member in guild_members:
-                            if (user_name.lower() in member.name.lower() or 
-                                user_name.lower() in member.display_name.lower()):
-                                mentioned_users.append(member)
-                                break
-                
-                # If we found users, execute the find_times command with the right parameters
-                if mentioned_users:
-                    # Create a custom context for the command
-                    ctx = await bot.get_context(message)
-                    
-                    # Choose the date range based on the time period
-                    today = datetime.now().date()
-                    
-                    if time_period == "today":
-                        # Modify the find_times command to only show today
-                        # Save original start_date and end_date
-                        original_start_date = find_times.__globals__.get("start_date")
-                        original_end_date = find_times.__globals__.get("end_date")
-                        
-                        # Override for this call
-                        find_times.__globals__["start_date"] = today
-                        find_times.__globals__["end_date"] = today
-                        
-                        # Call the command
-                        await find_times(ctx, *mentioned_users)
-                        
-                        # Restore original values
-                        find_times.__globals__["start_date"] = original_start_date
-                        find_times.__globals__["end_date"] = original_end_date
-                    else:
-                        # Use default week-long range
-                        await find_times(ctx, *mentioned_users)
-        except Exception as e:
-            print(f"Error processing natural language query: {e}")
-
-@bot.command(name="help", help="Show available commands")
+@bot.command(name="help")
 async def help_command(ctx):
     """Show available commands"""
     embed = discord.Embed(
@@ -202,67 +79,289 @@ async def help_command(ctx):
         color=discord.Color.blue()
     )
     
-    # Registration commands
+    # Standard commands
     embed.add_field(
-        name="!register", 
-        value="Connect your Google Calendar to Skedge",
+        name="Calendar Connection",
+        value=(
+            "`!register` - Connect your Google Calendar to Skedge\n"
+            "`!unregister` - Remove your calendar connection\n"
+            "`!status` - Check if your calendar is connected"
+        ),
         inline=False
     )
     
     embed.add_field(
-        name="!unregister", 
-        value="Remove your calendar connection from Skedge",
+        name="Calendar View",
+        value=(
+            "`!viewcal` or `!cal` - View your calendar for the week\n"
+            "`!viewcal @user` - View another user's calendar (if they're registered)"
+        ),
         inline=False
     )
     
     embed.add_field(
-        name="!asciical", 
-        value="Show your calendar in ASCII art format",
+        name="Scheduling",
+        value=(
+            "`!findtime @user` - Find available meeting times (default: next 3 days, 30 min)\n"
+            "`!findtime @user duration=15` - Find 15-minute meeting slots\n"
+            "`!findtime @user days=7` - Look ahead 7 days instead of 3\n"
+            "`!findtime @user1 @user2 duration=15 days=7` - Multiple users with options"
+        ),
         inline=False
     )
     
-    embed.add_field(
-        name="!simplecal", 
-        value="Show your calendar in a simple text format",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="!find_times [@user1 @user2 ...]", 
-        value="Find common free times between you and mentioned users",
-        inline=False
-    )
-    
-    # Add admin commands if the user is an admin
+    # Admin commands - only show to admins
     if is_admin(ctx.author):
         embed.add_field(
-            name="!users", 
-            value="Show all registered users (admin only)",
-            inline=False
-        )
-        
-        embed.add_field(
-            name="!viewcal [username]", 
-            value="View another user's calendar (admin only)",
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="!users", 
-            value="Show all registered users (admin only)",
+            name="Admin Commands",
+            value=(
+                "`!users` - List all registered users\n"
+                "`!dbtest` - Test database connection"
+            ),
             inline=False
         )
     
-    embed.add_field(
-        name="!help", 
-        value="Shows all commands",
-        inline=False
-    )
-    
-    embed.set_footer(text="Skedge - Making scheduling simple!")
+    embed.set_footer(text="Made with ❤️ by the Skedge team")
     await ctx.send(embed=embed)
 
-# Registration Commands
+@bot.command(name="viewcal", aliases=["calendar", "cal"])
+async def view_calendar(ctx, username=None):
+    """View a user's calendar for the next week"""
+    # Resolve target user
+    target_user = None
+    if username:
+        # Try to find by mention
+        if ctx.message.mentions:
+            target_user = ctx.message.mentions[0]
+        else:
+            # Try to find by name
+            for member in ctx.guild.members:
+                if username.lower() in member.name.lower() or (member.nick and username.lower() in member.nick.lower()):
+                    target_user = member
+                    break
+    else:
+        # Default to command invoker
+        target_user = ctx.author
+    
+    if not target_user:
+        await ctx.send(f"❌ User '{username}' not found.")
+        return
+        
+    # Check if the user is registered
+    user_data = await agent.db.get_user(str(target_user.id))
+    if not user_data or not user_data.get("access_token"):
+        await ctx.send(f"❌ {target_user.mention} is not registered or needs to reconnect their calendar.")
+        return
+    
+    # Send a "working on it" message
+    loading_message = await ctx.send(f"📅 Fetching calendar for {target_user.mention}...")
+    
+    try:
+        # Access token for API call
+        access_token = user_data.get("access_token")
+        
+        # Check if token is expired and needs refresh
+        token_expiry = user_data.get("token_expiry", 0)
+        
+        # Fix for token_expiry handling - handle both timestamp and ISO format
+        current_time = datetime.now().timestamp()
+        
+        # If token_expiry is a string, try to handle it properly
+        if isinstance(token_expiry, str):
+            try:
+                # First try direct float conversion (for legacy timestamps)
+                token_expiry = float(token_expiry)
+            except ValueError:
+                try:
+                    # If that fails, try parsing as ISO datetime
+                    expiry_dt = datetime.fromisoformat(token_expiry)
+                    token_expiry = expiry_dt.timestamp()
+                except Exception:
+                    # If all parsing fails, assume token is expired
+                    token_expiry = 0
+                    print(f"Could not parse token expiry: {token_expiry}")
+        
+        if current_time > token_expiry:
+            # Try to refresh the token
+            refresh_success = await refresh_token_for_user(
+                target_user.id, user_data.get("refresh_token")
+            )
+            
+            if refresh_success:
+                # Get the updated user data with new token
+                user_data = await agent.db.get_user(str(target_user.id))
+                access_token = user_data.get("access_token")
+            else:
+                await ctx.send(f"❌ Could not refresh the calendar token for {target_user.mention}. Please `!unregister` and `!register` again.")
+                await loading_message.delete()
+                return
+                
+        # Get user's timezone or use Pacific by default
+        user_tz = user_data.get("timezone", "America/Los_Angeles")
+        display_timezone = pytz.timezone(user_tz)
+        
+        # Get calendar events for the next 7 days
+        start_date = datetime.now().date()
+        end_date = start_date + timedelta(days=7)
+        
+        # Fetch events from Cronofy
+        status, response_text = await agent.cronofy_api_call(
+            endpoint="v1/events",
+            auth_token=access_token,
+            params={
+                "tzid": user_tz,
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
+                "include_managed": "true"
+            }
+        )
+        
+        if status != 200:
+            if status == 401:
+                await ctx.send(f"❌ Authentication failed for {target_user.mention}'s calendar. They need to `!unregister` and `!register` again.")
+            else:
+                await ctx.send(f"❌ Error fetching calendar: {status}")
+            await loading_message.delete()
+            return
+        
+        # Parse the events
+        try:
+            response_data = json.loads(response_text)
+            events = response_data.get("events", [])
+            
+            if not events:
+                await ctx.send(f"📅 No events found in {target_user.mention}'s calendar for the next week.")
+                await loading_message.delete()
+                return
+            
+            # Format the events nicely
+            formatted_events = format_events(events, display_timezone)
+            await ctx.send(f"📅 **Calendar for {target_user.mention}**:\n{formatted_events}")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Error processing calendar data: {str(e)}")
+            print(f"Error processing calendar: {e}")
+        
+        # Delete the loading message
+        await loading_message.delete()
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+        await loading_message.delete()
+        print(f"Calendar view error: {e}")
+
+def format_events(events, display_timezone):
+    """Format events into a readable text format"""
+    days = {}
+    
+    for event in events:
+        try:
+            # Get basic event info
+            summary = event.get("summary", "Untitled Event")
+            
+            # Handle different time formats from the API
+            start_str = event.get("start", "")
+            end_str = event.get("end", "")
+            
+            # Default time string
+            time_str = "All day"
+            day_str = ""
+            
+            # Handle event times
+            if isinstance(start_str, str) and "T" in start_str:
+                # Parse start time - assume UTC since we requested UTC times
+                event_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                if event_start.tzinfo is None:
+                    event_start = event_start.replace(tzinfo=pytz.UTC)
+                
+                # Always convert to the display timezone
+                local_start = event_start.astimezone(display_timezone)
+                
+                # Parse end time with the same approach
+                event_end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                if event_end.tzinfo is None:
+                    event_end = event_end.replace(tzinfo=pytz.UTC)
+                local_end = event_end.astimezone(display_timezone)
+                
+                # Format times
+                day_str = local_start.strftime("%Y-%m-%d")
+                start_time_str = local_start.strftime("%-I:%M %p")
+                end_time_str = local_end.strftime("%-I:%M %p")
+                
+                # Get timezone abbreviation
+                tz_abbr = local_start.strftime("%Z")
+                time_str = f"{start_time_str} - {end_time_str} {tz_abbr}"
+            
+            # Add to the appropriate day
+            if day_str not in days:
+                days[day_str] = []
+            
+            days[day_str].append({
+                "time": time_str,
+                "summary": summary
+            })
+        except Exception as e:
+            print(f"Error parsing event: {e}")
+            continue
+    
+    # Format the output
+    formatted_events = "```\n"
+    
+    for day_str in sorted(days.keys()):
+        # Convert day string to datetime for proper formatting
+        day_date = datetime.strptime(day_str, "%Y-%m-%d").date()
+        day_name = day_date.strftime("%A, %B %d")
+        
+        formatted_events += f"{day_name}:\n"
+        
+        # Sort events by time
+        days[day_str].sort(key=lambda x: x["time"])
+        
+        for event in days[day_str]:
+            formatted_events += f"  • {event['time']}: {event['summary']}\n"
+        
+        formatted_events += "\n"
+    
+    formatted_events += "```"
+    return formatted_events
+
+async def refresh_token_for_user(user_id, refresh_token):
+    """Attempt to refresh an expired token"""
+    try:
+        token_url = "https://api.cronofy.com/oauth/token"
+        payload = {
+            "client_id": agent.cronofy_client_id,
+            "client_secret": os.getenv("CRONOFY_CLIENT_SECRET"),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        
+        async with agent.session.post(token_url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                token_data = await response.json()
+                
+                # Update user with new tokens
+                user_data = await agent.db.get_user(str(user_id))
+                if user_data:
+                    user_data["access_token"] = token_data.get("access_token")
+                    user_data["refresh_token"] = token_data.get("refresh_token")
+                    user_data["token_expiry"] = datetime.now().timestamp() + token_data.get("expires_in", 3600)
+                    
+                    # Save updated tokens
+                    await agent.db.save_user(user_data)
+                    return True
+            else:
+                error_data = await response.text()
+                print(f"Token refresh error: {error_data}")
+                return False
+    except Exception as e:
+        print(f"Exception refreshing token: {e}")
+        return False
+    
+    return False
+
 @bot.command(name="register", help="Connect your Google Calendar to Skedge")
 async def register(ctx):
     """Start the registration process"""
@@ -294,9 +393,9 @@ async def register(ctx):
             f"Please copy that ENTIRE URL and paste it back to me here.\n\n"
             f"If you encounter any errors, try `!unregister` followed by `!register` again."
         )
-        await ctx.send(f"{user.mention}, I've sent you a DM with registration instructions. Please check your messages!")
+        await ctx.send(f"{ctx.author.mention}, I've sent you a DM with registration instructions. Please check your messages!")
     else:
-        await ctx.send(f"{user.mention}, I couldn't send you a DM. Please make sure you have DMs enabled from server members.")
+        await ctx.send(f"Error starting registration process. Please try again later.")
 
 
 @bot.command(name="unregister", help="Remove your calendar connection from Skedge")
@@ -330,844 +429,400 @@ async def unregister(ctx):
     
     await ctx.send(message)
 
-@bot.command(name="asciical", help="Show your calendar in ASCII format")
-async def ascii_calendar(ctx):
-    """Display a user's calendar in ASCII art format"""
-    user = ctx.author
+
+@bot.command(name="status", help="Check your registration status")
+async def status(ctx):
+    """Check a user's registration status"""
+    user_data = await agent.db.get_user(str(ctx.author.id))
     
-    # Check if user is registered
-    user_data = await agent.db.get_user(str(user.id))
     if not user_data:
-        await ctx.send(f"{user.mention}, you need to register first! Use `!register` to connect your calendar.")
+        await ctx.send(f"{ctx.author.mention}, you're not registered. Use `!register` to connect your calendar.")
         return
     
-    await ctx.send(f"📊 Generating your ASCII calendar, {user.mention}...")
-    
-    try:
-        # Get token
-        if isinstance(user_data, dict):
-            auth_token = user_data.get("access_token", user_data.get("auth_code"))
-        else:
-            auth_token = user_data
-            
-        if not auth_token:
-            await ctx.send(f"❌ Couldn't find your authorization token. Please try `!register` again.")
-            return
-        
-        # Get calendar events for the next 7 days - use local timezone
-        start_date = datetime.now().date()
-        end_date = start_date + timedelta(days=7)
-        
-        # Fetch events with debug info
-        print(f"Fetching events from {start_date} to {end_date}")
-        
-        # Fetch events
-        status, response_text = await agent.cronofy_api_call(
-            endpoint="v1/events",
-            auth_token=auth_token,
-            params={
-                "tzid": "America/Los_Angeles",
-                "from": start_date.isoformat(),
-                "to": end_date.isoformat(),
-                "include_managed": "true"
-            }
-        )
-        
-        if status != 200:
-            if status == 401:
-                await ctx.send(f"❌ **Authentication Error:** Your calendar connection needs to be refreshed. Please `!unregister` and then `!register` again.")
-            else:
-                await ctx.send(f"❌ Error fetching your calendar: {status}\nDetails: {response_text[:100]}...")
-            print(f"Calendar API Error ({status}): {response_text}")
-            return
-            
-        # Detailed debug for event data
-        print(f"API response: {response_text[:200]}...")
-        
-        try:
-            response_data = json.loads(response_text)
-            events = response_data.get("events", [])
-            
-            # Print the first entire event for debugging
-            if events and len(events) > 0:
-                print(f"First event structure: {json.dumps(events[0], indent=2)}")
-            
-            # Debug event count
-            print(f"Found {len(events)} events in calendar")
-            
-            # Validate and process each event with the correct structure
-            valid_events = []
-            for i, event in enumerate(events):
-                try:
-                    if isinstance(event, dict):
-                        summary = event.get("summary", "Unknown")
-                        
-                        # Handle different API response formats
-                        start_time = None
-                        
-                        # Check for direct ISO string format
-                        if isinstance(event.get("start"), str) and "T" in event.get("start"):
-                            # Format the event into our expected structure
-                            start_time = event.get("start")
-                            end_time = event.get("end")
-                            
-                            # Create a normalized event dict
-                            normalized_event = {
-                                "summary": summary,
-                                "start": {"time": start_time},
-                                "end": {"time": end_time}
-                            }
-                            print(f"Event {i}: {summary} at {start_time}")
-                            valid_events.append(normalized_event)
-                        # Check for standard dictionary format
-                        elif isinstance(event.get("start"), dict):
-                            valid_events.append(event)
-                        else:
-                            print(f"Event {i} has unrecognized start field format: {event.get('start')}")
-                    else:
-                        print(f"Skipping non-dictionary event {i}: {event}")
-                except Exception as e:
-                    print(f"Error processing event {i}: {e}")
-                    continue
-            
-            # Generate ASCII calendar with validated events - now as MULTIPLE MESSAGES
-            calendar_days = generate_daily_ascii_calendars(valid_events, start_date, end_date)
-            
-            # Send each day's calendar as a separate message
-            if calendar_days:
-                for day_cal in calendar_days:
-                    await ctx.send(f"```\n{day_cal}\n```")
-            else:
-                await ctx.send("📅 No events found for the next week!")
-                
-        except json.JSONDecodeError:
-            await ctx.send("❌ Could not parse calendar data. API might be returning invalid JSON.")
-            print(f"Invalid JSON: {response_text}")
-        
-    except Exception as e:
-        await ctx.send(f"❌ Error generating ASCII calendar: {str(e)}")
-        print(f"ASCII calendar error: {e}")
-        import traceback
-        traceback.print_exc()
+    if user_data.get("access_token"):
+        await ctx.send(f"{ctx.author.mention}, your calendar is connected and active. ✅")
+    else:
+        await ctx.send(f"{ctx.author.mention}, your registration is pending. Please complete the process by following the DM instructions.")
 
-def generate_daily_ascii_calendars(events, start_date, end_date):
-    """Generate separate ASCII calendar boxes for each day"""
-    calendar_days = []
-    
-    # Process each day
-    current_date = start_date
-    while current_date <= end_date:
-        day_name = current_date.strftime("%A")
-        date_str = current_date.strftime("%B %d")
-        
-        # Create a calendar table for this day
-        day_cal = f"╔═══════════════ {day_name.upper()} {date_str} ════════════════╗\n"
-        
-        # Filter events for this day - with better timezone handling
-        day_events = []
-        for event in events:
-            # Validate the event
-            if not isinstance(event, dict):
-                continue
-            
-            # Get the start time
-            start_dict = event.get("start", {})
-            if not isinstance(start_dict, dict):
-                continue
-                
-            # Get time or date from the event
-            event_start = start_dict.get("time") or start_dict.get("date")
-            if not event_start:
-                continue
-                
-            try:
-                # Handle timezone properly by converting to local time first
-                if 'T' in event_start:  # This is a timestamp with time
-                    # Force UTC+0 interpretation then convert to local time
-                    event_dt = datetime.fromisoformat(event_start.replace('Z', '+00:00'))
-                    # Convert to local date - subtract 8 hours for PST
-                    local_dt = event_dt - timedelta(hours=8)
-                    event_date = local_dt.date()
-                else:  # This is just a date
-                    event_date = datetime.fromisoformat(event_start).date()
-                
-                # Check if this event is on the current day
-                if event_date == current_date:
-                    day_events.append(event)
-            except (ValueError, AttributeError):
-                continue
-        
-        # Sort events by start time (with timezone adjustment)
-        def safe_get_time(e):
-            start = e.get("start", {})
-            if not isinstance(start, dict):
-                return ""
-                
-            time_str = start.get("time", "") or start.get("date", "")
-            if time_str and 'T' in time_str:
-                try:
-                    # Convert to local time for sorting
-                    dt = datetime.fromisoformat(time_str.replace('Z', '+00:00')) - timedelta(hours=8)
-                    return dt.isoformat()
-                except:
-                    pass
-            return time_str
-            
-        day_events.sort(key=safe_get_time)
-        
-        # Add events or indication that day is empty
-        if day_events:
-            for event in day_events:
-                event_name = event.get("summary", "Busy")
-                
-                # Safely get and format times
-                try:
-                    start_dict = event.get("start", {})
-                    end_dict = event.get("end", {})
-                    
-                    if isinstance(start_dict, dict) and isinstance(end_dict, dict):
-                        # Check for time-based event first, then date-based (all-day) event
-                        start_time_str = start_dict.get("time", "")
-                        end_time_str = end_dict.get("time", "")
-                        
-                        if start_time_str and end_time_str:
-                            # Fix timezone by subtracting 8 hours
-                            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00')) - timedelta(hours=8)
-                            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00')) - timedelta(hours=8)
-                            
-                            # Format as 12-hour time
-                            start_fmt = start_time.strftime("%I:%M %p")
-                            end_fmt = end_time.strftime("%I:%M %p")
-                            
-                            time_range = f"{start_fmt} - {end_fmt}"
-                            event_str = f"║ {time_range} | {event_name}"
-                            day_cal += event_str.ljust(49) + "║\n"
-                        else:
-                            # All-day event
-                            day_cal += f"║ All day | {event_name}".ljust(49) + "║\n"
-                    else:
-                        day_cal += f"║ Unknown time | {event_name}".ljust(49) + "║\n"
-                except Exception:
-                    day_cal += f"║ Error | {event_name}".ljust(49) + "║\n"
-        else:
-            day_cal += "║ No events scheduled".ljust(49) + "║\n"
-        
-        # Add bottom border
-        day_cal += "╚═══════════════════════════════════════════════╝"
-        
-        # Add this day's calendar to the list
-        calendar_days.append(day_cal)
-        
-        # Move to next day
-        current_date += timedelta(days=1)
-    
-    return calendar_days
+@bot.event
+async def on_close():
+    """Called when the bot is shutting down"""
+    print("Bot is shutting down, closing sessions...")
+    await agent.close()
 
-# Add this simple version as a separate command for testing
-@bot.command(name="simplecal", help="Simple calendar view")
-async def simple_calendar(ctx):
-    """Simple calendar view that's more error tolerant"""
-    user = ctx.author
-    
-    # Check if registered
-    user_data = await agent.db.get_user(str(user.id))
-    if not user_data:
-        await ctx.send(f"{user.mention}, you need to register first with `!register`")
-        return
-        
-    await ctx.send(f"📅 Fetching your calendar, {user.mention}...")
-    
-    try:
-        # Get token
-        auth_token = user_data.get("access_token") if isinstance(user_data, dict) else user_data
-        
-        # Get events for next 7 days
-        start_date = datetime.now().date()
-        end_date = start_date + timedelta(days=7)
-        
-        # Call API
-        status, response_text = await agent.cronofy_api_call(
-            endpoint="v1/events",
-            auth_token=auth_token,
-            params={
-                "tzid": "America/Los_Angeles",
-                "from": start_date.isoformat(),
-                "to": end_date.isoformat(),
-            }
-        )
-        
-        if status != 200:
-            await ctx.send(f"❌ Calendar API error: {status}")
-            return
-            
-        # Parse response with super safe error handling
-        calendar_text = "📅 **Your Calendar**\n\n"
-        
-        try:
-            data = json.loads(response_text)
-            events = data.get("events", [])
-            
-            # Print the first entire event for debugging
-            if events and len(events) > 0:
-                print(f"First event structure: {json.dumps(events[0], indent=2)}")
-            
-            # Group events by day
-            days = {}
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                    
-                # Get summary safely
-                summary = str(event.get("summary", "Busy Time"))
-                
-                # Handle different API response formats for start time
-                start_str = None
-                
-                # Check if start is a direct ISO string
-                if isinstance(event.get("start"), str) and "T" in event.get("start"):
-                    start_str = event.get("start")
-                # Check for dictionary format
-                elif isinstance(event.get("start"), dict):
-                    start_str = event.get("start").get("time") or event.get("start").get("date")
-                
-                if not start_str:
-                    continue
-                    
-                # Parse the start time
-                try:
-                    if "T" in start_str:
-                        event_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                        day_str = event_dt.strftime("%Y-%m-%d")
-                        time_str = event_dt.strftime("%I:%M %p")
-                    else:
-                        day_str = start_str
-                        time_str = "All day"
-                        
-                    # Add to days dict
-                    if day_str not in days:
-                        days[day_str] = []
-                        
-                    days[day_str].append(f"• {time_str}: {summary}")
-                except:
-                    continue
-            
-            # Now format the days
-            for day_str in sorted(days.keys()):
-                try:
-                    day_date = datetime.fromisoformat(day_str).date()
-                    day_name = day_date.strftime("%A, %B %d")
-                    
-                    calendar_text += f"**{day_name}**\n"
-                    for event_str in days[day_str]:
-                        calendar_text += f"{event_str}\n"
-                    calendar_text += "\n"
-                except:
-                    continue
-                    
-            if not days:
-                calendar_text += "No events found in your calendar."
-                
-            await ctx.send(calendar_text)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error parsing calendar: {e}")
-            
-    except Exception as e:
-        await ctx.send(f"❌ Calendar error: {e}")
-
-# Adding a User List Command with Password Protection
-
-@bot.command(name="users", help="Show all registered users (admin only)")
+@bot.command(name="users")
 async def list_users(ctx):
-    """Display all registered users (requires permission)"""
-    user = ctx.author
-    
-    # Use the is_admin function for checking
-    if not is_admin(user):
-        await ctx.send(f"{user.mention}, sorry, you don't have permission to use this command.")
+    """List all registered users (admin only)"""
+    # Admin check
+    if not is_admin(ctx.author):
+        await ctx.send("❌ This command is only available to admins.")
         return
     
     # Get all users from database
     all_users = await agent.db.get_all_users()
     
     if not all_users:
-        await ctx.send("No registered users found!")
+        await ctx.send("No users are currently registered.")
         return
     
-    # Create a nicely formatted table with user info
-    table = "```\n"
-    table += "📊 Registered Users\n\n"
+    # Create an embed to display user info
+    embed = discord.Embed(
+        title="Registered Users",
+        description=f"There are {len(all_users)} registered users.",
+        color=discord.Color.blue()
+    )
     
-    # Add header - removed Email column
-    table += f"{'#':<3} {'Username':<20} {'Registered':<20}\n"
-    table += "─" * 45 + "\n"  # Reduced width now that email is gone
-    
-    # Add each user row
-    for i, user_data in enumerate(all_users, 1):
+    # Add each user to the embed
+    for user_data in all_users:
+        discord_id = user_data.get("discord_id", "Unknown")
         discord_name = user_data.get("discord_name", "Unknown")
         
-        # Format registration date
-        reg_date = "Unknown"
-        registered_at = None
-        if "data" in user_data and user_data["data"]:
-            try:
-                data_json = json.loads(user_data["data"])
-                registered_at = data_json.get("registered_at")
-            except:
-                pass
+        # Check token status
+        has_token = "access_token" in user_data and user_data["access_token"]
+        token_status = "✅ Active" if has_token else "❌ Missing"
         
-        if registered_at:
+        # Check expiry - FIXED TYPE ERROR
+        token_expiry = user_data.get("token_expiry", 0)
+        expiry_text = ""
+        if token_expiry:
             try:
-                reg_datetime = datetime.fromtimestamp(float(registered_at))
-                # Format as "March 4 3:24P"
-                month = reg_datetime.strftime("%B")
-                day = reg_datetime.day  # No leading zero
-                hour = reg_datetime.hour % 12  # Convert to 12-hour format
-                if hour == 0:
-                    hour = 12  # Handle noon/midnight
-                minute = reg_datetime.strftime("%M")
-                am_pm = "AM" if reg_datetime.hour < 12 else "PM"  # Just A or P instead of AM/PM
+                # If token_expiry is a string, try to handle it properly
+                if isinstance(token_expiry, str):
+                    try:
+                        # First try direct float conversion (for legacy timestamps)
+                        token_expiry = float(token_expiry)
+                    except ValueError:
+                        try:
+                            # If that fails, try parsing as ISO datetime
+                            expiry_dt = datetime.fromisoformat(token_expiry)
+                            token_expiry = expiry_dt.timestamp()
+                        except Exception:
+                            # If parsing fails, keep the string for display
+                            expiry_text = f"\nExpiry data invalid: {token_expiry}"
+                            token_expiry = None
                 
-                reg_date = f"{month} {day} {hour}:{minute}{am_pm}"
-            except:
-                pass
+                if token_expiry is not None:
+                    expiry_date = datetime.fromtimestamp(token_expiry)
+                    expiry_text = f"\nExpires: {expiry_date.strftime('%Y-%m-%d %H:%M')}"
+            except (ValueError, TypeError) as e:
+                expiry_text = f"\nExpiry data error: {str(e)}"
         
-        # Add row to table - removed email
-        table += f"{i:<3} {discord_name[:20]:<20} {reg_date:<20}\n"
-    
-    table += "```"
-    
-    # Send the results
-    await ctx.send(table)
-
-# Adding Admin Calendar Viewing Functionality
-
-@bot.command(name="viewcal", help="Admin: View another user's calendar")
-async def view_calendar(ctx, username=None):
-    """View a user's calendar (admin only, or your own)"""
-    requester = ctx.author
-    
-    # If no username provided, show the requester's own calendar
-    if not username:
-        await simple_calendar(ctx)
-        return
-    
-    # Check if requester is admin
-    if not is_admin(requester):
-        await ctx.send(f"{requester.mention}, sorry, you don't have permission to view other users' calendars.")
-        return
-    
-    # Get all users to find the one we're looking for
-    all_users = await agent.db.get_all_users()
-    target_user_data = None
-    
-    # Find the user by name
-    for user_data in all_users:
-        if user_data.get("discord_name", "").lower() == username.lower():
-            target_user_data = user_data
-            break
-    
-    if not target_user_data:
-        await ctx.send(f"❌ User '{username}' not found or not registered.")
-        return
-    
-    await ctx.send(f"📅 Fetching {username}'s calendar...")
-    
-    try:
-        # Get token from the target user's data
-        auth_token = target_user_data.get("access_token")
-        if not auth_token:
-            # Try to get from data field as fallback
-            data_json = json.loads(target_user_data.get("data", "{}"))
-            auth_token = data_json.get("access_token", target_user_data.get("auth_code"))
-            
-        if not auth_token:
-            await ctx.send(f"❌ Couldn't find authorization token for {username}. They may need to re-register.")
-            return
-        
-        # Get events for next 7 days
-        start_date = datetime.now().date()
-        end_date = start_date + timedelta(days=7)
-        
-        # Call API
-        status, response_text = await agent.cronofy_api_call(
-            endpoint="v1/events",
-            auth_token=auth_token,
-            params={
-                "tzid": "America/Los_Angeles",
-                "from": start_date.isoformat(),
-                "to": end_date.isoformat(),
-            }
+        embed.add_field(
+            name=f"{discord_name} ({discord_id})",
+            value=f"Token: {token_status}{expiry_text}",
+            inline=False
         )
-        
-        if status != 200:
-            if status == 401:
-                await ctx.send(f"❌ **Authentication Error:** {username}'s calendar connection needs to be refreshed. They should `!unregister` and then `!register` again.")
-            else:
-                await ctx.send(f"❌ Error fetching {username}'s calendar: {status}")
-            return
-            
-        # Parse response with super safe error handling
-        email = "Unknown"
-        if "data" in target_user_data and target_user_data["data"]:
-            try:
-                data_json = json.loads(target_user_data["data"])
-                email = data_json.get("email", "Unknown")
-            except:
-                pass
-        
-        calendar_text = f"📅 **{username}'s Calendar** ({email})\n\n"
-        
-        try:
-            data = json.loads(response_text)
-            events = data.get("events", [])
-            
-            # Group events by day
-            days = {}
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                    
-                # Get summary safely
-                summary = str(event.get("summary", "Busy Time"))
-                
-                # Handle different API response formats for start time
-                start_str = None
-                
-                # Check if start is a direct ISO string
-                if isinstance(event.get("start"), str) and "T" in event.get("start"):
-                    start_str = event.get("start")
-                # Check for dictionary format
-                elif isinstance(event.get("start"), dict):
-                    start_str = event.get("start").get("time") or event.get("start").get("date")
-                
-                if not start_str:
-                    continue
-                    
-                # Parse the start time
-                try:
-                    if "T" in start_str:
-                        # Parse with explicit timezone handling
-                        event_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                        
-                        # Ensure it's timezone aware and convert to Pacific time
-                        if event_dt.tzinfo is None:
-                            event_dt = event_dt.replace(tzinfo=pytz.UTC)
-                        
-                        pacific_tz = pytz.timezone('America/Los_Angeles')
-                        local_dt = event_dt.astimezone(pacific_tz)
-                        
-                        # Format with timezone name for clarity
-                        day_str = local_dt.strftime("%Y-%m-%d")
-                        time_str = local_dt.strftime("%I:%M %p")
-                        
-                        # Add timezone indicator
-                        if local_dt.dst():
-                            time_str += " PDT"
-                        else:
-                            time_str += " PST"
-                    else:
-                        day_str = start_str
-                        time_str = "All day"
-                        
-                    # Add to days dict
-                    if day_str not in days:
-                        days[day_str] = []
-                        
-                    days[day_str].append(f"• {time_str}: {summary}")
-                except:
-                    continue
-            
-            # Now format the days
-            for day_str in sorted(days.keys()):
-                try:
-                    day_date = datetime.fromisoformat(day_str).date()
-                    day_name = day_date.strftime("%A, %B %d")
-                    
-                    calendar_text += f"**{day_name}**\n"
-                    for event_str in days[day_str]:
-                        calendar_text += f"{event_str}\n"
-                    calendar_text += "\n"
-                except:
-                    continue
-                    
-            if not days:
-                calendar_text += "No events found in their calendar."
-                
-            await ctx.send(calendar_text)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Error parsing calendar: {e}")
-            
-    except Exception as e:
-        await ctx.send(f"❌ Calendar error: {e}")
-
-# Start the bot
-@bot.command(name="find_times")
-async def find_times(ctx, *users: discord.Member):
-    """Find common available times between multiple users using Cronofy's Availability API"""
     
-    # Check if users were provided
-    if not users:
-        await ctx.send("❌ Please mention at least one user to find common times with.")
+    await ctx.send(embed=embed)
+
+@bot.command(name="dbtest")
+async def db_test(ctx):
+    """Test database connection"""
+    try:
+        user_count = len(await agent.db.get_all_users())
+        await ctx.send(f"✅ Database connection successful. Found {user_count} users.")
+    except Exception as e:
+        await ctx.send(f"❌ Database error: {type(e).__name__}: {str(e)}")
+
+@bot.command(name="findtime", aliases=["schedule", "meet"])
+async def find_time(ctx, *, participants_and_options=None):
+    """Find available meeting times between registered users
+    
+    Usage: !findtime @user1 @user2 [options]
+    Options (optional):
+      duration=30 (in minutes)
+      days=3 (how many days ahead to look)
+    """
+    # Parse command arguments
+    if not participants_and_options:
+        await ctx.send("❌ Please mention at least one other user to find meeting times with.")
         return
     
-    # Add the command author to the list if they're not already included
-    requester = ctx.author
-    all_users = list(users)
-    if requester not in all_users:
-        all_users.insert(0, requester)  # Add requester as first user
+    # Parse mentions and any options
+    mentions = ctx.message.mentions
+    participants = [ctx.author] + mentions  # Include command author
     
-    # Debug message with all users being checked
-    debug_users = ', '.join([f"{user.name} ({user.id})" for user in all_users])
-    await ctx.send(f"🔍 Looking for common free times between: {debug_users}...")
+    # Make sure we have at least 2 participants
+    if len(participants) < 2:
+        await ctx.send("❌ Please mention at least one other user to find meeting times with.")
+        return
     
-    # Check if all users are registered and collect their tokens
-    participants = []
-    missing_users = []
+    # Check that all participants are registered
+    unregistered_users = []
+    participant_tokens = {}
+    participant_profile_ids = []
     
-    for user in all_users:
+    # Loading message
+    loading_msg = await ctx.send(f"🔍 Finding available times for {len(participants)} participants...")
+    
+    # Get tokens and profile IDs for all participants
+    for user in participants:
         user_data = await agent.db.get_user(str(user.id))
-        if not user_data:
-            missing_users.append(user.name)
-            continue
+        if not user_data or not user_data.get("access_token"):
+            unregistered_users.append(user.mention)
+        else:
+            # Handle token expiry
+            token_expiry = user_data.get("token_expiry", 0)
+            current_time = datetime.now().timestamp()
             
-        # Get token with more detailed debugging
-        auth_token = user_data.get("access_token")
-        if not auth_token:
-            # Try alternative fields
-            try:
-                if "data" in user_data:
-                    data_json = json.loads(user_data.get("data", "{}"))
-                    auth_token = data_json.get("access_token")
-                
-                if not auth_token and "auth_code" in user_data:
-                    auth_token = user_data.get("auth_code")
-                    
-                print(f"Using alternative token source for {user.name}: {auth_token[:10]}...")
-            except Exception as e:
-                print(f"Token extraction error for {user.name}: {e}")
-        
-        if not auth_token:
-            missing_users.append(user.name)
-            print(f"No valid auth token found for {user.name}")
-            continue
+            # Parse token_expiry properly
+            if isinstance(token_expiry, str):
+                try:
+                    token_expiry = float(token_expiry)
+                except ValueError:
+                    try:
+                        expiry_dt = datetime.fromisoformat(token_expiry)
+                        token_expiry = expiry_dt.timestamp()
+                    except Exception:
+                        token_expiry = 0
             
-        # First get profile ID for this user
-        status, profile_response = await agent.cronofy_api_call(
-            endpoint="v1/userinfo",
-            method="GET",
-            auth_token=auth_token
-        )
-        
-        if status != 200:
-            await ctx.send(f"⚠️ Couldn't fetch profile for {user.name}: Error {status}")
-            print(f"Profile fetch error for {user.name}: {profile_response}")
-            continue
-            
-        try:
-            profile_data = json.loads(profile_response)
-            profile_id = profile_data.get("sub")
-            
-            print(f"Profile data for {user.name}: {json.dumps(profile_data, indent=2)}")
-            
-            if not profile_id:
-                await ctx.send(f"⚠️ Couldn't find profile ID for {user.name}")
-                continue
-            
-            # Get calendars for this user with error details
-            status, calendars_response = await agent.cronofy_api_call(
-                endpoint="v1/calendars",
-                method="GET",
-                auth_token=auth_token
-            )
-            
-            if status != 200:
-                await ctx.send(f"⚠️ Couldn't fetch calendars for {user.name}: Error {status}")
-                print(f"Calendar fetch error for {user.name}: {calendars_response}")
-                continue
-                
-            calendars_data = json.loads(calendars_response)
-            print(f"Calendars for {user.name}: {json.dumps(calendars_data, indent=2)}")
-            
-            calendar_ids = []
-            
-            for calendar in calendars_data.get("calendars", []):
-                # Only include read-write calendars that can be used for availability
-                if calendar.get("calendar_readonly", True) == False:
-                    calendar_ids.append(calendar.get("calendar_id"))
+            # Refresh token if needed
+            if current_time > token_expiry:
+                refreshed = await refresh_token_for_user(user.id, user_data.get("refresh_token"))
+                if refreshed:
+                    user_data = await agent.db.get_user(str(user.id))
                 else:
-                    print(f"Skipping read-only calendar: {calendar.get('calendar_name')}")
+                    unregistered_users.append(user.mention)
+                    continue
             
-            # If no writeable calendars, include all calendars as fallback
-            if not calendar_ids:
-                for calendar in calendars_data.get("calendars", []):
-                    calendar_ids.append(calendar.get("calendar_id"))
-            
-            if not calendar_ids:
-                await ctx.send(f"⚠️ No calendars found for {user.name}")
-                continue
+            # Get Cronofy profile ID
+            try:
+                status, userinfo_response = await agent.cronofy_api_call(
+                    endpoint="v1/userinfo",
+                    auth_token=user_data.get("access_token")
+                )
                 
-            # Add user to participants list with more detailed structure
-            participants.append({
-                "required": "all",  # This user must be available
-                "members": [{
-                    "sub": profile_id,
-                    "calendar_ids": calendar_ids
-                }]
-            })
-            
-            print(f"Added participant {user.name} with profile ID {profile_id} and calendars: {calendar_ids}")
-        except Exception as e:
-            await ctx.send(f"⚠️ Error processing {user.name}'s profile: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            continue
+                if status != 200:
+                    print(f"Failed to get userinfo: {status}")
+                    unregistered_users.append(user.mention)
+                    continue
+                
+                userinfo = json.loads(userinfo_response)
+                cronofy_sub = userinfo.get("sub")
+                
+                if not cronofy_sub:
+                    print(f"No sub ID in userinfo for {user.display_name}")
+                    unregistered_users.append(user.mention)
+                    continue
+                
+                # Store the access token and profile ID
+                participant_tokens[str(user.id)] = user_data.get("access_token")
+                participant_profile_ids.append({
+                    "sub": cronofy_sub
+                })
+                
+                print(f"Found Cronofy profile ID for {user.display_name}: {cronofy_sub}")
+                
+            except Exception as e:
+                print(f"Error getting user profile: {e}")
+                unregistered_users.append(user.mention)
+                continue
     
-    # Check if we're missing any users
-    if missing_users:
-        if len(missing_users) == len(all_users):
-            await ctx.send("❌ None of the mentioned users are registered with Schedge.")
-            return
-        
-        await ctx.send(f"⚠️ Warning: The following users are not registered: {', '.join(missing_users)}")
-    
-    if not participants:
-        await ctx.send("❌ No valid participants found with registered calendars.")
+    # If any users aren't registered, notify and exit
+    if unregistered_users:
+        if len(unregistered_users) == 1:
+            await ctx.send(f"❌ {unregistered_users[0]} needs to connect their calendar using `!register` first.")
+        else:
+            users_list = ", ".join(unregistered_users)
+            await ctx.send(f"❌ These users need to connect their calendars: {users_list}")
+        await loading_msg.delete()
         return
     
-    # Set up availability query parameters
-    start_date = datetime.now().date()
-    end_date = start_date + timedelta(days=7)
-
-    # Get current time in Pacific time
-    pacific_tz = pytz.timezone('America/Los_Angeles')
-    now_pacific = datetime.now(pacific_tz)
-
-    # If it's already past 9am, start from tomorrow instead
-    if now_pacific.hour >= 9:
-        start_date = (now_pacific + timedelta(days=1)).date()
+    # Parse options
+    duration = 30  # Default 30 minute meetings
+    days_ahead = 3  # Default look 3 days ahead
     
-    # Format dates correctly - no Z suffix for local time
-    start_datetime = pacific_tz.localize(datetime.combine(start_date, datetime.min.time().replace(hour=9)))
-    end_datetime = pacific_tz.localize(datetime.combine(end_date, datetime.min.time().replace(hour=18)))
-
-    # Improved availability request with proper timezone handling
-    availability_request = {
-        "participants": participants,
-        "required_duration": {"minutes": 30},
-        "query_periods": [
-            {
-                "start": start_datetime.isoformat(),
-                "end": end_datetime.isoformat()
-            }
-        ],
-        "tzid": "America/Los_Angeles"
-    }
+    if participants_and_options:
+        options_text = participants_and_options.split(" ")
+        for option in options_text:
+            if "duration=" in option:
+                try:
+                    duration = int(option.split("=")[1])
+                except:
+                    pass
+            if "days=" in option:
+                try:
+                    days_ahead = int(option.split("=")[1])
+                except:
+                    pass
     
-    # Print the request for debugging
-    await ctx.send("Checking availability... (this might take a moment)")
-    print(f"Availability request: {json.dumps(availability_request, indent=2)}")
+    # Prepare query periods (days with business hours)
+    now = datetime.now()
+    query_periods = []
+    
+    # Start from tomorrow to avoid partial day issues
+    start_day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    
+    for day_offset in range(days_ahead):
+        day = start_day + timedelta(days=day_offset)
+        
+        # Skip weekends if you want - COMMENTING OUT TO INCLUDE WEEKENDS
+        # if day.weekday() < 5:  # 0-4 are weekdays (Mon-Fri)
+        
+        # Extended hours: 7 AM - 9 PM
+        day_start = day.replace(hour=7, minute=0, second=0)
+        day_end = day.replace(hour=21, minute=0, second=0)
+        
+        query_periods.append({
+            "start": day_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": day_end.strftime("%Y-%m-%dT%H:%M:%SZ")
+        })
     
     try:
-        # Call Cronofy Availability API - use a valid token
-        status, response_text = await agent.cronofy_api_call(
-            endpoint="v1/availability",
-            method="POST",
-            auth_token=auth_token,  # Use the last valid token we found
-            json_data=availability_request
-        )
+        # Build availability request with the correct format
+        availability_data = {
+            "participants": [
+                {
+                    "members": participant_profile_ids,
+                    "required": "all"
+                }
+            ],
+            "required_duration": {"minutes": duration},
+            "available_periods": [
+                {
+                    "start": start_day.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "end": (start_day + timedelta(days=days_ahead)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                }
+            ]
+        }
         
-        if status != 200:
-            # Print the request and response for debugging
-            print(f"Error response: {response_text}")
-            await ctx.send(f"❌ Error checking availability: {status}")
-            return
-            
-        # Parse the response
-        data = json.loads(response_text)
-        available_slots = data.get("available_periods", [])
+        # Debug print
+        print("==== AVAILABILITY REQUEST ====")
+        print(json.dumps(availability_data, indent=2))
+        print("=============================")
         
-        if not available_slots:
-            await ctx.send("😢 No common free times found in the next week during business hours (9 AM - 6 PM).")
-            return
+        # Make the API call using first participant's token
+        first_token = list(participant_tokens.values())[0]
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {first_token}"
+        }
         
-        # Format the results
-        formatted_calendar = "```\n"
-        formatted_calendar += f"📅 Common Free Times for {len(participants)} Users\n\n"
-        
-        # Group slots by day
-        slots_by_day = {}
-        
-        for slot in available_slots:
-            # Explicitly handle the timezone conversion with DST awareness
-            start_time = datetime.fromisoformat(slot["start"].replace("Z", "+00:00"))
-            pacific_tz = pytz.timezone('America/Los_Angeles')
-            # Force timezone recalculation to handle DST properly
-            utc_time = start_time.replace(tzinfo=pytz.UTC)
-            start_time = utc_time.astimezone(pacific_tz)
-            
-            day_key = start_time.strftime("%Y-%m-%d")
-            if day_key not in slots_by_day:
-                slots_by_day[day_key] = []
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.cronofy.com/v1/availability", 
+                headers=headers,
+                json=availability_data
+            ) as response:
+                response_text = await response.text()
                 
-            slots_by_day[day_key].append(start_time)
-        
-        # Process each day
-        for day_key in sorted(slots_by_day.keys()):
-            day_obj = datetime.strptime(day_key, "%Y-%m-%d")
-            day_name = day_obj.strftime("%A, %B %d")
-            
-            formatted_calendar += f"=== {day_name} ===\n"
-            
-            # Group consecutive time slots
-            slots = sorted(slots_by_day[day_key])
-            slot_groups = []
-            
-            if slots:
-                current_group = [slots[0]]
+                # Debug print
+                print("==== AVAILABILITY RESPONSE ====")
+                print(f"Status: {response.status}")
+                print(response_text)
+                print("=============================")
                 
-                for i in range(1, len(slots)):
-                    prev_slot = slots[i-1]
-                    curr_slot = slots[i]
+                if response.status == 200:
+                    result = json.loads(response_text)
+                    available_slots = result.get("slots", [])
                     
-                    # Check if slots are consecutive (30 min apart)
-                    if (curr_slot - prev_slot).total_seconds() == 1800:  # 30 minutes in seconds
-                        current_group.append(curr_slot)
+                    if not available_slots:
+                        await ctx.send(f"❌ No common availability found in the next {days_ahead} days for a {duration} minute meeting.")
                     else:
-                        # Start a new group
-                        slot_groups.append(current_group)
-                        current_group = [curr_slot]
-                
-                # Add the last group
-                slot_groups.append(current_group)
-                
-                # Format each group
-                for group in slot_groups:
-                    # Use timezone-aware formatting for times
-                    start_time = group[0].strftime("%-I:%M %p")  # No leading zero
-                    end_time = (group[-1] + timedelta(minutes=30)).strftime("%-I:%M %p")  # Add 30 min to end
-                    
-                    # Add timezone indicator to make it clear
-                    if group[0].dst():
-                        tz_name = "PDT"  # Pacific Daylight Time
-                    else:
-                        tz_name = "PST"  # Pacific Standard Time
-                    
-                    formatted_calendar += f"  • {start_time} - {end_time} {tz_name}\n"
-            else:
-                formatted_calendar += "  • No free times\n"
-                
-            formatted_calendar += "\n"
-        
-        formatted_calendar += "```"
-        
-        # Send the formatted calendar
-        await ctx.send(formatted_calendar)
-        
+                        # Format available slots
+                        slot_text = format_available_slots(available_slots)
+                        
+                        # Show results
+                        participant_names = [p.display_name for p in participants]
+                        names_text = ", ".join(participant_names)
+                        
+                        embed = discord.Embed(
+                            title=f"📅 Available Meeting Times",
+                            description=f"Common availability for: {names_text}\nFor a {duration} minute meeting:",
+                            color=discord.Color.green()
+                        )
+                        
+                        embed.add_field(name="Available Slots", value=slot_text, inline=False)
+                        embed.set_footer(text="To schedule, copy a time and create a calendar event")
+                        
+                        await ctx.send(embed=embed)
+                else:
+                    await ctx.send(f"❌ Error finding availability: {response.status} - {response_text[:100]}")
     except Exception as e:
-        await ctx.send(f"❌ Error processing availability: {str(e)}")
+        await ctx.send(f"❌ Error checking availability: {str(e)}")
+        print(f"Availability API error: {e}")
+    
+    # Delete loading message
+    await loading_msg.delete()
 
-# Always keep this as the LAST line in your file
-token = os.getenv("DISCORD_TOKEN")
-bot.run(token)
+def format_available_slots(slots):
+    """Format available time slots into readable text"""
+    if not slots:
+        return "No available slots found."
+    
+    formatted_text = ""
+    current_day = None
+    
+    for slot in slots:
+        # Updated to work with new format from Cronofy slots format
+        start_time = datetime.fromisoformat(slot["start"].replace("Z", "+00:00"))
+        end_time = datetime.fromisoformat(slot["end"].replace("Z", "+00:00"))
+        
+        # Convert to local time (Pacific Time)
+        pacific = pytz.timezone("America/Los_Angeles")
+        local_start = start_time.astimezone(pacific)
+        local_end = end_time.astimezone(pacific)
+        
+        # Check if this is a new day
+        day_str = local_start.strftime("%A, %B %d")
+        if day_str != current_day:
+            current_day = day_str
+            formatted_text += f"\n**{day_str}**\n"
+        
+        # Format the time slot
+        start_str = local_start.strftime("%-I:%M %p")
+        end_str = local_end.strftime("%-I:%M %p %Z")
+        formatted_text += f"• {start_str} - {end_str}\n"
+    
+    return formatted_text
+
+@bot.command(name="freetime")
+async def free_time(ctx, username=None):
+    """Check a user's free time directly from their calendar"""
+    # Get target user
+    target_user = ctx.author
+    if username and ctx.message.mentions:
+        target_user = ctx.message.mentions[0]
+        
+    # Get user data
+    user_data = await agent.db.get_user(str(target_user.id))
+    if not user_data or not user_data.get("access_token"):
+        await ctx.send(f"❌ {target_user.mention} is not registered.")
+        return
+    
+    # Get free/busy directly
+    access_token = user_data.get("access_token")
+    start_date = datetime.now()
+    end_date = start_date + timedelta(days=3)
+    
+    status, response_text = await agent.cronofy_api_call(
+        endpoint="v1/free_busy",
+        auth_token=access_token,
+        params={
+            "from": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
+    )
+    
+    if status == 200:
+        response_data = json.loads(response_text)
+        free_busy = response_data.get("free_busy", [])
+        
+        if not free_busy:
+            await ctx.send(f"📅 No busy periods found for {target_user.mention} in the next 3 days.")
+        else:
+            # Count busy periods
+            count = len(free_busy)
+            await ctx.send(f"📅 Found {count} busy periods for {target_user.mention} in the next 3 days.")
+            
+            # Show a few examples
+            if count > 0:
+                examples = free_busy[:3]  # Show up to 3 examples
+                example_text = "\n".join([f"• {e.get('start')} to {e.get('end')}" for e in examples])
+                await ctx.send(f"Example busy times:\n{example_text}")
+    else:
+        await ctx.send(f"❌ Error checking free/busy: {status}")
+
+# Run the bot
+if __name__ == "__main__":
+    bot.run(os.getenv("DISCORD_TOKEN"))

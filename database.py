@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from supabase import create_client
 import asyncio
 from dotenv import load_dotenv
+import uuid
 
 class Database:
     """Database class using Supabase as the backend."""
@@ -194,3 +195,34 @@ class Database:
         # ...
         
         return True 
+    
+    async def get_or_create_user_id(self, discord_id):
+        """Get existing user ID or create a new persistent one"""
+        # Check if user already exists in our system
+        user_data = await self.get_user(discord_id)
+        
+        if user_data and "user_uuid" in user_data:
+            # User exists and has a UUID, return it
+            return user_data["user_uuid"]
+        else:
+            # Generate a new UUID for this user
+            new_uuid = str(uuid.uuid4())
+            
+            # Store it in the database (create or update user record)
+            if not user_data:
+                user_data = {"discord_id": discord_id}
+            
+            user_data["user_uuid"] = new_uuid
+            await self.store_user(discord_id, user_data)
+            
+            return new_uuid 
+    
+    async def get_user_by_uuid(self, uuid):
+        """Get a user by their persistent UUID"""
+        all_users = await self.get_all_users()
+        
+        for user_id, user_data in all_users.items():
+            if user_data.get("user_uuid") == uuid:
+                return user_data
+        
+        return None 
