@@ -5,6 +5,7 @@ import asyncio
 import json
 import aiohttp
 import traceback
+import pytz
 
 # For URL shortening if available
 try:
@@ -203,7 +204,7 @@ class MistralAgent:
                 "discord_name": user.name,
                 "access_token": token_data.get("access_token"),
                 "refresh_token": token_data.get("refresh_token"),
-                "token_expiry": datetime.now().timestamp() + expires_in,
+                "token_expiry": datetime.now(pytz.UTC).timestamp() + expires_in,
                 "auth_code": auth_code  # Store the original auth code too
             }
             

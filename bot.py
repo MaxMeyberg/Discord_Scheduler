@@ -94,7 +94,8 @@ async def help_command(ctx):
         name="Calendar View",
         value=(
             "`!viewcal` or `!cal` - View your calendar for the week\n"
-            "`!viewcal @user` - View another user's calendar (if they're registered)"
+            "`!viewcal @user` - View another user's calendar (if they're registered)\n"
+            "`!freetime` - Check your busy periods directly from calendar"
         ),
         inline=False
     )
@@ -164,7 +165,7 @@ async def view_calendar(ctx, username=None):
         token_expiry = user_data.get("token_expiry", 0)
         
         # Fix for token_expiry handling - handle both timestamp and ISO format
-        current_time = datetime.now().timestamp()
+        current_time = datetime.now(pytz.UTC).timestamp()
         
         # If token_expiry is a string, try to handle it properly
         if isinstance(token_expiry, str):
@@ -173,8 +174,8 @@ async def view_calendar(ctx, username=None):
                 token_expiry = float(token_expiry)
             except ValueError:
                 try:
-                    # If that fails, try parsing as ISO datetime
-                    expiry_dt = datetime.fromisoformat(token_expiry)
+                    # If that fails, try parsing as ISO datetime with timezone
+                    expiry_dt = datetime.fromisoformat(token_expiry.replace('Z', '+00:00'))
                     token_expiry = expiry_dt.timestamp()
                 except Exception:
                     # If all parsing fails, assume token is expired
@@ -342,16 +343,21 @@ async def refresh_token_for_user(user_id, refresh_token):
             if response.status == 200:
                 token_data = await response.json()
                 
-                # Update user with new tokens
-                user_data = await agent.db.get_user(str(user_id))
-                if user_data:
-                    user_data["access_token"] = token_data.get("access_token")
-                    user_data["refresh_token"] = token_data.get("refresh_token")
-                    user_data["token_expiry"] = datetime.now().timestamp() + token_data.get("expires_in", 3600)
-                    
-                    # Save updated tokens
-                    await agent.db.save_user(user_data)
-                    return True
+                # Get token expiry time (default to 1 hour if not specified)
+                expires_in = token_data.get("expires_in", 3600)
+                token_expiry = datetime.now(pytz.UTC).timestamp() + expires_in
+                
+                # Update the user data with the new token
+                user_data = {
+                    "discord_id": str(user_id),
+                    "access_token": token_data.get("access_token"),
+                    "refresh_token": token_data.get("refresh_token"),
+                    "token_expiry": token_expiry  # Using UTC-based timestamp
+                }
+                
+                # Save updated tokens
+                await agent.db.save_user(user_data)
+                return True
             else:
                 error_data = await response.text()
                 print(f"Token refresh error: {error_data}")
@@ -563,7 +569,7 @@ async def find_time(ctx, *, participants_and_options=None):
         else:
             # Handle token expiry
             token_expiry = user_data.get("token_expiry", 0)
-            current_time = datetime.now().timestamp()
+            current_time = datetime.now(pytz.UTC).timestamp()
             
             # Parse token_expiry properly
             if isinstance(token_expiry, str):
@@ -646,30 +652,19 @@ async def find_time(ctx, *, participants_and_options=None):
                 except:
                     pass
     
-    # Prepare query periods (days with business hours)
-    now = datetime.now()
-    query_periods = []
+    # Prepare query periods with proper RFC3339 format
+    now = datetime.now(pytz.timezone("America/Los_Angeles"))
     
-    # Start from tomorrow to avoid partial day issues
-    start_day = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    # Start 30 min from now (using your system's current time)
+    start_date = now + timedelta(minutes=30)
+    end_date = now + timedelta(days=days_ahead)
     
-    for day_offset in range(days_ahead):
-        day = start_day + timedelta(days=day_offset)
-        
-        # Skip weekends if you want - COMMENTING OUT TO INCLUDE WEEKENDS
-        # if day.weekday() < 5:  # 0-4 are weekdays (Mon-Fri)
-        
-        # Extended hours: 7 AM - 9 PM
-        day_start = day.replace(hour=7, minute=0, second=0)
-        day_end = day.replace(hour=21, minute=0, second=0)
-        
-        query_periods.append({
-            "start": day_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "end": day_end.strftime("%Y-%m-%dT%H:%M:%SZ")
-        })
+    # Format in strict RFC3339 format
+    start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     
     try:
-        # Build availability request with the correct format
+        # Build availability request with proper RFC3339 dates
         availability_data = {
             "participants": [
                 {
@@ -680,8 +675,8 @@ async def find_time(ctx, *, participants_and_options=None):
             "required_duration": {"minutes": duration},
             "available_periods": [
                 {
-                    "start": start_day.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "end": (start_day + timedelta(days=days_ahead)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    "start": start_str,
+                    "end": end_str
                 }
             ]
         }
@@ -778,7 +773,7 @@ def format_available_slots(slots):
 
 @bot.command(name="freetime")
 async def free_time(ctx, username=None):
-    """Check a user's free time directly from their calendar"""
+    """Show a user's free time slots in the next few days"""
     # Get target user
     target_user = ctx.author
     if username and ctx.message.mentions:
@@ -792,36 +787,172 @@ async def free_time(ctx, username=None):
     
     # Get free/busy directly
     access_token = user_data.get("access_token")
-    start_date = datetime.now()
-    end_date = start_date + timedelta(days=3)
     
-    status, response_text = await agent.cronofy_api_call(
-        endpoint="v1/free_busy",
-        auth_token=access_token,
-        params={
-            "from": start_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "to": end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-        }
-    )
+    # Calculate dates - use simpler ISO format without microseconds
+    now = datetime.now()
+    start_date = now
+    end_date = now + timedelta(days=3)
     
-    if status == 200:
-        response_data = json.loads(response_text)
-        free_busy = response_data.get("free_busy", [])
+    # Format dates properly for Cronofy
+    from_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+    
+    # Loading message
+    loading_msg = await ctx.send(f"🔍 Finding free time slots for {target_user.mention}...")
+    
+    try:
+        # Use the events endpoint for calendar data
+        status, response_text = await agent.cronofy_api_call(
+            endpoint="v1/events",
+            auth_token=access_token,
+            params={
+                "tzid": "UTC",
+                "from": from_str,
+                "to": to_str,
+                "include_managed": "true"
+            }
+        )
         
-        if not free_busy:
-            await ctx.send(f"📅 No busy periods found for {target_user.mention} in the next 3 days.")
-        else:
-            # Count busy periods
-            count = len(free_busy)
-            await ctx.send(f"📅 Found {count} busy periods for {target_user.mention} in the next 3 days.")
+        if status == 200:
+            response_data = json.loads(response_text)
+            events = response_data.get("events", [])
             
-            # Show a few examples
-            if count > 0:
-                examples = free_busy[:3]  # Show up to 3 examples
-                example_text = "\n".join([f"• {e.get('start')} to {e.get('end')}" for e in examples])
-                await ctx.send(f"Example busy times:\n{example_text}")
-    else:
-        await ctx.send(f"❌ Error checking free/busy: {status}")
+            # Create a list of busy periods with start and end times
+            busy_periods = []
+            for event in events:
+                try:
+                    start_str = event.get("start", "")
+                    end_str = event.get("end", "")
+                    
+                    # Parse ISO times to datetime objects
+                    start_time = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                    end_time = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    
+                    busy_periods.append((start_time, end_time))
+                except Exception as e:
+                    print(f"Error parsing event time: {e}")
+            
+            # Sort busy periods by start time
+            busy_periods.sort(key=lambda x: x[0])
+            
+            if not busy_periods:
+                await ctx.send(f"🎉 {target_user.mention} is completely free for the next 3 days!")
+                await loading_msg.delete()
+                return
+            
+            # Calculate free periods between busy periods
+            free_periods = []
+            
+            # Set time boundaries for the day (9AM to 5PM)
+            pacific = pytz.timezone("America/Los_Angeles")
+            
+            # Start with current time or beginning of day if we're before 9AM
+            current_time = now.astimezone(pacific)
+            day_start = current_time.replace(hour=9, minute=0, second=0, microsecond=0)
+            
+            # If it's already past 9AM, use current time as start
+            if current_time.hour >= 9:
+                day_start = current_time
+            
+            # Loop through each of the next 3 days
+            for day_offset in range(3):
+                # Calculate the day we're looking at
+                target_day = (current_time + timedelta(days=day_offset)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                
+                # For today, start at current time or 9AM, whichever is later
+                if day_offset == 0:
+                    time_start = day_start
+                else:
+                    # For future days, start at 9AM
+                    time_start = target_day.replace(hour=9, minute=0)
+                
+                # End at 5PM
+                time_end = target_day.replace(hour=17, minute=0)
+                
+                # Filter busy periods for this day
+                day_busy_periods = [
+                    (s, e) for s, e in busy_periods 
+                    if s.date() == target_day.date() or e.date() == target_day.date()
+                ]
+                
+                # If no busy periods for this day, the whole day is free
+                if not day_busy_periods:
+                    free_periods.append((time_start, time_end))
+                    continue
+                
+                # Calculate free time between busy periods for this day
+                last_end_time = time_start
+                
+                for busy_start, busy_end in day_busy_periods:
+                    # Convert to Pacific time for comparison
+                    busy_start_local = busy_start.astimezone(pacific)
+                    busy_end_local = busy_end.astimezone(pacific)
+                    
+                    # Skip events outside our 9-5 window
+                    if busy_end_local <= time_start or busy_start_local >= time_end:
+                        continue
+                    
+                    # If busy period starts after our last endpoint, we have free time
+                    if busy_start_local > last_end_time:
+                        free_periods.append((last_end_time, busy_start_local))
+                    
+                    # Update the last end time, taking the maximum
+                    last_end_time = max(last_end_time, busy_end_local)
+                
+                # Add any remaining time at the end of the day
+                if last_end_time < time_end:
+                    free_periods.append((last_end_time, time_end))
+            
+            # Format the free periods for display
+            free_times = []
+            current_day = None
+            
+            for start, end in free_periods:
+                # Check if the free period is at least 15 minutes
+                duration = (end - start).total_seconds() / 60
+                if duration < 15:
+                    continue
+                    
+                # Format the time slot
+                day_str = start.strftime("%A, %B %d")
+                
+                # Add day header if this is a new day
+                if day_str != current_day:
+                    current_day = day_str
+                    free_times.append(f"\n**{day_str}**")
+                
+                # Format the time slot
+                start_str = start.strftime("%-I:%M %p")
+                end_str = end.strftime("%-I:%M %p")
+                free_times.append(f"• {start_str} to {end_str} ({int(duration)} min)")
+            
+            # Create an embed with the free times
+            if free_times:
+                embed = discord.Embed(
+                    title=f"📅 Free Time for {target_user.display_name}",
+                    description="Available time slots in the next 3 days (9AM-5PM):",
+                    color=discord.Color.green()
+                )
+                
+                embed.add_field(
+                    name="Free Time Slots",
+                    value="\n".join(free_times),
+                    inline=False
+                )
+                
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send(f"😔 {target_user.mention} has no free time slots (15+ minutes) in the next 3 days during business hours.")
+        else:
+            await ctx.send(f"❌ Error checking calendar: {status} - {response_text[:100]}")
+    except Exception as e:
+        await ctx.send(f"❌ Error finding free time: {str(e)}")
+        print(f"Free time error: {e}")
+    
+    # Delete loading message
+    await loading_msg.delete()
 
 # Run the bot
 if __name__ == "__main__":
