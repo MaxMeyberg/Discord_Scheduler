@@ -270,8 +270,11 @@ async def on_message(message):
             # First let the user know we're using Mistral API
             loading_msg = await message.channel.send("🧠 Analyzing your request with Mistral AI...")
             
+            # Make sure we're not including the bot in mentioned users
+            filtered_mentions = [user for user in mentioned_users if user.id != bot.user.id]
+            
             # Call Mistral NLP processing
-            command = await agent.process_natural_language(content, message.author, mentioned_users)
+            command = await agent.process_natural_language(content, message.author, filtered_mentions)
             
             # Delete the loading message
             await loading_msg.delete()
@@ -1159,30 +1162,62 @@ async def find_time(ctx, *args):
     await loading_msg.delete()
 
 @bot.command(name="freetime")
-async def free_time(ctx, username=None):
-    """Show a user's free time slots in the next few days"""
+async def free_time(ctx, username=None, date=None, time=None):
+    """Show a user's free time slots with enhanced parameters"""
     # Get target user
     target_user = ctx.author
+    
+    # Handle case where username is provided
     if username and ctx.message.mentions:
-        target_user = ctx.message.mentions[0]
-        
-    # Get user data
+        # Make sure we don't accidentally use the bot as target_user
+        mentions = [user for user in ctx.message.mentions if user.id != bot.user.id]
+        if mentions:
+            target_user = mentions[0]
+    
+    # Get user data - only check the actual target user, not the bot
     user_data = await agent.db.get_user(str(target_user.id))
     if not user_data or not user_data.get("access_token"):
         await ctx.send(f"❌ {target_user.mention} is not registered.")
         return
     
+    # Process date parameter
+    days_to_add = 0
+    
+    if date:
+        # Handle common date references
+        date_lower = date.lower()
+        if date_lower == "today":
+            days_to_add = 0
+        elif date_lower == "tomorrow":
+            days_to_add = 1
+        elif date_lower in ["day after tomorrow", "dayaftertomorrow"]:
+            days_to_add = 2
+        elif date_lower.startswith("next"):
+            # Handle "next monday", "next week", etc.
+            if "week" in date_lower:
+                days_to_add = 7
+            elif any(day in date_lower for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]):
+                # Calculate days until next specified weekday
+                target_day = next((day for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"] if day in date_lower), None)
+                if target_day:
+                    current_weekday = datetime.now().weekday()
+                    target_weekday = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}[target_day]
+                    days_to_add = (target_weekday - current_weekday) % 7
+                    if days_to_add == 0:  # If today is the target day, go to next week
+                        days_to_add = 7
+            else:
+                days_to_add = 7  # Default to next week
+        elif date_lower in ["weekend", "this weekend"]:
+            # Calculate days until weekend
+            current_weekday = datetime.now().weekday()
+            days_to_add = (5 - current_weekday) % 7  # Days until Saturday
+    
+    # Calculate dates
+    start_date = datetime.now() + timedelta(days=days_to_add)
+    end_date = start_date + timedelta(days=1)  # Look at just the specified day
+    
     # Get free/busy directly
     access_token = user_data.get("access_token")
-    
-    # Calculate dates - use simpler ISO format without microseconds
-    now = datetime.now()
-    start_date = now
-    end_date = now + timedelta(days=3)
-    
-    # Format dates properly for Cronofy
-    from_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    to_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
     
     # Loading message
     loading_msg = await ctx.send(f"🔍 Finding free time for {target_user.mention}...")
@@ -1194,8 +1229,8 @@ async def free_time(ctx, username=None):
             auth_token=access_token,
             params={
                 "tzid": "UTC",
-                "from": from_str,
-                "to": to_str,
+                "from": start_date.isoformat(),
+                "to": end_date.isoformat(),
                 "include_managed": "true"
             }
         )
@@ -1229,7 +1264,7 @@ async def free_time(ctx, username=None):
             pacific = pytz.timezone("America/Los_Angeles")
             
             # Start with current time or beginning of day if we're before 9AM
-            current_time = now.astimezone(pacific)
+            current_time = start_date.astimezone(pacific)
             day_start = current_time.replace(hour=9, minute=0, second=0, microsecond=0)
             
             # If it's already past 9AM, use current time as start

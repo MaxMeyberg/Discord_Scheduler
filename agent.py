@@ -374,15 +374,20 @@ class MistralAgent:
         return auth_url
 
     async def process_natural_language(self, message_content, author, mentioned_users):
-        """
-        Process natural language using Mistral API to understand intent and extract entities
-        """
-        # Prepare prompt for Mistral
+        """Process natural language using Mistral API to understand intent and extract entities"""
+        # Filter out the bot itself from mentioned_users before processing
+        mentioned_users = [user for user in mentioned_users if user.id != self.bot.user.id]
+        
+        # Prepare more comprehensive prompt for Mistral
         prompt = f"""
-        You are a scheduling assistant. Analyze this message and determine:
+        You are a scheduling assistant for a Discord bot called Skedge. Analyze this message and determine:
         1. What is the user's intent? (schedule_meeting, view_calendar, check_free_time, get_help, register)
         2. Who is involved? (the message author or mentioned people)
-        3. Any time parameters mentioned (duration, days ahead, specific dates/times)
+        3. Any time parameters mentioned:
+           - Duration (e.g., 30 minutes, 1 hour)
+           - Days ahead (e.g., next 3 days)
+           - Specific dates/times (e.g., tomorrow, next Monday, this weekend, afternoon)
+           - Time of day references (morning, afternoon, evening)
         
         Message: {message_content}
         
@@ -392,7 +397,9 @@ class MistralAgent:
             "target_users": "list of user mentions or 'author' if about the message sender",
             "duration_minutes": optional number,
             "days_ahead": optional number,
-            "date_time": optional specific date/time mentioned
+            "date_reference": optional string (e.g., "tomorrow", "next Monday", "weekend"),
+            "time_of_day": optional string (e.g., "morning", "afternoon", "evening"),
+            "specific_date": optional date in YYYY-MM-DD format if a specific date was mentioned
         }}
         """
         
@@ -412,7 +419,17 @@ class MistralAgent:
                 # Create viewcal command
                 return self.create_viewcal_command(parsed_response, author, mentioned_users)
                 
-            # ... handle other intents
+            elif parsed_response["intent"] == "check_free_time":
+                # Create freetime command
+                return self.create_freetime_command(parsed_response, author, mentioned_users)
+                
+            elif parsed_response["intent"] == "get_help":
+                # Create help command
+                return "!help"
+                
+            elif parsed_response["intent"] == "register":
+                # Create register command
+                return "!register"
                 
             else:
                 # Unknown intent
@@ -423,7 +440,10 @@ class MistralAgent:
             return None
 
     def create_findtime_command(self, parsed_response, author, mentioned_users):
-        """Create a !findtime command from parsed Mistral response"""
+        """Create a !findtime command from parsed Mistral response with time references"""
+        # Make sure we don't include the bot itself
+        mentioned_users = [user for user in mentioned_users if user.id != self.bot.user.id]
+        
         # Start with the base command
         command = "!findtime"
         
@@ -436,19 +456,67 @@ class MistralAgent:
         if "duration_minutes" in parsed_response and parsed_response["duration_minutes"]:
             command += f" duration={parsed_response['duration_minutes']}"
         
-        # Add days ahead if specified
+        # Add days_ahead if specified
         if "days_ahead" in parsed_response and parsed_response["days_ahead"]:
             command += f" days={parsed_response['days_ahead']}"
+        
+        # Add date_reference if specified (custom parameter)
+        if "date_reference" in parsed_response and parsed_response["date_reference"]:
+            command += f" date={parsed_response['date_reference']}"
+        
+        # Add time_of_day if specified (custom parameter)
+        if "time_of_day" in parsed_response and parsed_response["time_of_day"]:
+            command += f" time={parsed_response['time_of_day']}"
+        
+        # Add specific_date if specified (custom parameter)
+        if "specific_date" in parsed_response and parsed_response["specific_date"]:
+            command += f" date={parsed_response['specific_date']}"
         
         return command
 
     def create_viewcal_command(self, parsed_response, author, mentioned_users):
-        """Create a !viewcal command from parsed Mistral response"""
+        """Create a !viewcal command from parsed Mistral response with time references"""
+        # Make sure we don't include the bot itself
+        mentioned_users = [user for user in mentioned_users if user.id != self.bot.user.id]
+        
         command = "!viewcal"
         
         # If target is not the author, add the target mention
         if "target_users" in parsed_response and parsed_response["target_users"] != "author":
             if mentioned_users:
                 command += f" {mentioned_users[0].mention}"
+        
+        # Add date_reference if specified (custom parameter)
+        if "date_reference" in parsed_response and parsed_response["date_reference"]:
+            command += f" date={parsed_response['date_reference']}"
+        
+        # Add specific_date if specified (custom parameter)
+        if "specific_date" in parsed_response and parsed_response["specific_date"]:
+            command += f" date={parsed_response['specific_date']}"
+        
+        return command
+
+    def create_freetime_command(self, parsed_response, author, mentioned_users):
+        """Create a !freetime command from parsed Mistral response with time references"""
+        # Make sure we don't include the bot itself
+        mentioned_users = [user for user in mentioned_users if user.id != self.bot.user.id]
+        
+        command = "!freetime"
+        
+        # Only include a target user if we have valid mentioned users
+        if mentioned_users:
+            command += f" {mentioned_users[0].mention}"
+        
+        # Add date_reference if specified (custom parameter)
+        if "date_reference" in parsed_response and parsed_response["date_reference"]:
+            command += f" date={parsed_response['date_reference']}"
+        
+        # Add time_of_day if specified (custom parameter)
+        if "time_of_day" in parsed_response and parsed_response["time_of_day"]:
+            command += f" time={parsed_response['time_of_day']}"
+        
+        # Add specific_date if specified (custom parameter)
+        if "specific_date" in parsed_response and parsed_response["specific_date"]:
+            command += f" date={parsed_response['specific_date']}"
         
         return command
