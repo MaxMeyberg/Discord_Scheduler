@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import json
 import pytz
 import copy
+import re
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -105,15 +106,42 @@ async def on_message(message):
         await bot.process_commands(message)
         return
         
-    # Process the mention
+    # Process the mention with enhanced NLP
     content = message.content.lower().replace(f"<@{bot.user.id}>", "").strip()
     print(f"Processing mention: '{content}'")
     
     # Extract mentions (except the bot)
     mentioned_users = [user for user in message.mentions if user.id != bot.user.id]
     
-    # Find time command handling
-    if "free" in content and ("when" in content or "time" in content) and mentioned_users:
+    # Parse duration if mentioned
+    duration_match = re.search(r'(\d+)\s*(min|minute|minutes|hour|hours|hr|hrs)', content)
+    duration = None
+    if duration_match:
+        amount = int(duration_match.group(1))
+        unit = duration_match.group(2)
+        if unit.startswith('hour') or unit.startswith('hr'):
+            duration = amount * 60
+        else:
+            duration = amount
+    
+    # Parse days ahead if mentioned
+    days_match = re.search(r'(\d+)\s*(day|days)', content)
+    days_ahead = None
+    if days_match:
+        days_ahead = int(days_match.group(1))
+        if days_ahead > 14:
+            days_ahead = 14
+    
+    # FIND TIME INTENT - detects various ways to ask about finding time
+    find_time_keywords = [
+        "when can", "when are", "when is", "schedule", "meeting", "meet", 
+        "find time", "common time", "available time", "free time", "free slot",
+        "when are we free", "when are you free", "when can we meet", 
+        "set up a meeting", "setup a meeting", "arrange a meeting",
+        "time to meet", "time to talk", "time slot"
+    ]
+    
+    if any(keyword in content for keyword in find_time_keywords) and mentioned_users:
         await message.channel.send(f"🔍 Looking for common free time...")
         
         # Create a command message
@@ -124,7 +152,14 @@ async def on_message(message):
             await message.channel.send("❌ Please mention at least one other user to find common free time.")
             return
         
-        fake_message.content = f"!findtime {mention_text}"
+        # Build the command with any extracted parameters
+        command = f"!findtime {mention_text}"
+        if duration:
+            command += f" duration={duration}"
+        if days_ahead:
+            command += f" days={days_ahead}"
+            
+        fake_message.content = command
         PROCESSED_MESSAGES.add(fake_message.id)
         
         # Execute the command
@@ -133,8 +168,148 @@ async def on_message(message):
             await bot.process_commands(fake_message)
         else:
             await message.channel.send(f"❌ I couldn't run the findtime command. Try using `!findtime @user` directly.")
-    else:
-        await message.channel.send(f"I'm not sure what you're asking. For finding meeting times, try: '@Schedge when are @user and I free?'")
+        return
+    
+    # VIEW CALENDAR INTENT
+    view_cal_keywords = [
+        "show calendar", "view calendar", "see calendar", "check calendar",
+        "what's on my calendar", "what is on my calendar", "my schedule",
+        "my appointments", "my events", "what do i have", "what events",
+        "calendar for", "schedule for", "what's happening", "what is happening"
+    ]
+    
+    if any(keyword in content for keyword in view_cal_keywords):
+        target_user = None
+        
+        # Check if asking about someone else's calendar
+        if mentioned_users and any(word in content for word in ["their", "his", "her", "them"]):
+            target_user = mentioned_users[0]
+        else:
+            # Default to the requester if no specific target
+            target_user = message.author
+            
+        # Create and execute viewcal command
+        fake_message = copy.copy(message)
+        if target_user != message.author:
+            fake_message.content = f"!viewcal {target_user.mention}"
+        else:
+            fake_message.content = "!viewcal"
+            
+        PROCESSED_MESSAGES.add(fake_message.id)
+        ctx = await bot.get_context(fake_message)
+        if ctx.valid:
+            await bot.process_commands(fake_message)
+        else:
+            await message.channel.send("❌ I couldn't run the viewcal command. Try using `!viewcal` directly.")
+        return
+    
+    # FREE TIME INTENT
+    free_time_keywords = [
+        "when am i free", "my free time", "my availability", "free slots",
+        "available slots", "when are they free", "their availability",
+        "their free time", "check availability", "check free time"
+    ]
+    
+    if any(keyword in content for keyword in free_time_keywords):
+        target_user = None
+        
+        # Check if asking about someone else's free time
+        if mentioned_users and any(word in content for word in ["their", "his", "her", "them"]):
+            target_user = mentioned_users[0]
+        else:
+            # Default to the requester if no specific target
+            target_user = message.author
+            
+        # Create and execute freetime command
+        fake_message = copy.copy(message)
+        if target_user != message.author:
+            fake_message.content = f"!freetime {target_user.mention}"
+        else:
+            fake_message.content = "!freetime"
+            
+        PROCESSED_MESSAGES.add(fake_message.id)
+        ctx = await bot.get_context(fake_message)
+        if ctx.valid:
+            await bot.process_commands(fake_message)
+        else:
+            await message.channel.send("❌ I couldn't run the freetime command. Try using `!freetime` directly.")
+        return
+    
+    # HELP INTENT
+    help_keywords = [
+        "help", "commands", "how do i", "how to", "what can you do",
+        "features", "capabilities", "instructions", "guide me"
+    ]
+    
+    if any(keyword in content for keyword in help_keywords):
+        fake_message = copy.copy(message)
+        fake_message.content = "!help"
+        PROCESSED_MESSAGES.add(fake_message.id)
+        ctx = await bot.get_context(fake_message)
+        await bot.process_commands(fake_message)
+        return
+    
+    # REGISTRATION INTENT
+    register_keywords = [
+        "register", "connect", "setup calendar", "set up calendar", 
+        "link calendar", "connect calendar"
+    ]
+    
+    if any(keyword in content for keyword in register_keywords):
+        fake_message = copy.copy(message)
+        fake_message.content = "!register"
+        PROCESSED_MESSAGES.add(fake_message.id)
+        ctx = await bot.get_context(fake_message)
+        await bot.process_commands(fake_message)
+        return
+    
+    # When bot is mentioned
+    if is_mentioned:
+        # Send a typing indicator to show the bot is working
+        async with message.channel.typing():
+            # First let the user know we're using Mistral API
+            loading_msg = await message.channel.send("🧠 Analyzing your request with Mistral AI...")
+            
+            # Call Mistral NLP processing
+            command = await agent.process_natural_language(content, message.author, mentioned_users)
+            
+            # Delete the loading message
+            await loading_msg.delete()
+            
+            if command:
+                # Let the user know we're using Mistral AI to process their request
+                mistral_msg = f"✨ *Powered by Mistral AI* ✨\n\n"
+                
+                # Execute the generated command
+                fake_message = copy.copy(message)
+                fake_message.content = command
+                PROCESSED_MESSAGES.add(fake_message.id)
+                
+                # Send acknowledgment message
+                await message.channel.send(mistral_msg + "I understood your request and I'm processing it now...")
+                
+                ctx = await bot.get_context(fake_message)
+                if ctx.valid:
+                    await bot.process_commands(fake_message)
+                    return
+                else:
+                    await message.channel.send("❌ I understood your request but couldn't execute the command properly.")
+                    return
+        
+        # Fall back to keyword matching if Mistral couldn't determine intent
+        # ... existing keyword matching code ...
+    
+    # DEFAULT RESPONSE - Improved error handling with suggestions
+    suggestions = [
+        "For finding common free time, try: '@Skedge when can I meet with @user?'",
+        "To view your calendar, try: '@Skedge show my calendar'",
+        "To see your free time slots, try: '@Skedge when am I free?'",
+        "To get help with commands, try: '@Skedge help'"
+    ]
+    
+    response = "✨ *Powered by Mistral AI* ✨\n\nI'm not sure what you're asking. Here are some things you can ask me:\n\n"
+    response += "\n".join([f"• {suggestion}" for suggestion in suggestions])
+    await message.channel.send(response)
 
 @tasks.loop(minutes=10)
 async def cleanup_processed_messages():
@@ -190,9 +365,7 @@ async def help_command(ctx):
         name="AI Calendar Assistant",
         value=(
             "Mention the bot (@Skedge) in your message to ask any scheduling question:\n"
-            "• @Skedge When am I free tomorrow?\n"
             "• @Skedge Find time to meet with @user\n"
-            "• @Skedge Show me my calendar"
         ),
         inline=False
     )

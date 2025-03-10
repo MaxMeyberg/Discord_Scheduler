@@ -372,3 +372,83 @@ class MistralAgent:
         )
         
         return auth_url
+
+    async def process_natural_language(self, message_content, author, mentioned_users):
+        """
+        Process natural language using Mistral API to understand intent and extract entities
+        """
+        # Prepare prompt for Mistral
+        prompt = f"""
+        You are a scheduling assistant. Analyze this message and determine:
+        1. What is the user's intent? (schedule_meeting, view_calendar, check_free_time, get_help, register)
+        2. Who is involved? (the message author or mentioned people)
+        3. Any time parameters mentioned (duration, days ahead, specific dates/times)
+        
+        Message: {message_content}
+        
+        Respond in JSON format:
+        {{
+            "intent": "one of [schedule_meeting, view_calendar, check_free_time, get_help, register, unknown]",
+            "target_users": "list of user mentions or 'author' if about the message sender",
+            "duration_minutes": optional number,
+            "days_ahead": optional number,
+            "date_time": optional specific date/time mentioned
+        }}
+        """
+        
+        # Call Mistral API
+        response = await self.call_mistral_api(prompt)
+        
+        try:
+            # Parse the JSON response
+            parsed_response = json.loads(response)
+            
+            # Route to appropriate command based on intent
+            if parsed_response["intent"] == "schedule_meeting":
+                # Create findtime command
+                return self.create_findtime_command(parsed_response, author, mentioned_users)
+                
+            elif parsed_response["intent"] == "view_calendar":
+                # Create viewcal command
+                return self.create_viewcal_command(parsed_response, author, mentioned_users)
+                
+            # ... handle other intents
+                
+            else:
+                # Unknown intent
+                return None
+                
+        except Exception as e:
+            print(f"Error processing Mistral response: {e}")
+            return None
+
+    def create_findtime_command(self, parsed_response, author, mentioned_users):
+        """Create a !findtime command from parsed Mistral response"""
+        # Start with the base command
+        command = "!findtime"
+        
+        # Add mentions if available
+        if mentioned_users:
+            for user in mentioned_users:
+                command += f" {user.mention}"
+        
+        # Add duration if specified
+        if "duration_minutes" in parsed_response and parsed_response["duration_minutes"]:
+            command += f" duration={parsed_response['duration_minutes']}"
+        
+        # Add days ahead if specified
+        if "days_ahead" in parsed_response and parsed_response["days_ahead"]:
+            command += f" days={parsed_response['days_ahead']}"
+        
+        return command
+
+    def create_viewcal_command(self, parsed_response, author, mentioned_users):
+        """Create a !viewcal command from parsed Mistral response"""
+        command = "!viewcal"
+        
+        # If target is not the author, add the target mention
+        if "target_users" in parsed_response and parsed_response["target_users"] != "author":
+            if mentioned_users:
+                command += f" {mentioned_users[0].mention}"
+        
+        return command
