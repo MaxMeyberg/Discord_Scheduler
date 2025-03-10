@@ -6,6 +6,7 @@ import json
 import aiohttp
 import traceback
 import pytz
+import urllib.parse
 
 # For URL shortening if available
 try:
@@ -46,20 +47,35 @@ class MistralAgent:
             self.session = aiohttp.ClientSession()
             print("Created aiohttp session")
 
-    def get_cronofy_auth_url(self, discord_user_id):
-        """Generate a Cronofy authorization URL for a user"""
-        # Remove 'availability' from the scope - it's not a valid standalone scope
-        scope = "read_events read_free_busy"
-        state = str(discord_user_id)  # Use Discord user ID as state parameter
+    async def get_auth_url(self, discord_id):
+        """Get the Cronofy authorization URL for a user"""
+        client_id = os.getenv("CRONOFY_CLIENT_ID")
+        client_secret = os.getenv("CRONOFY_CLIENT_SECRET")
+        redirect_uri = os.getenv("REDIRECT_URI")
         
-        auth_url = (
-            f"https://app.cronofy.com/oauth/authorize"
-            f"?client_id={self.cronofy_client_id}"
-            f"&response_type=code"
-            f"&redirect_uri={self.cronofy_redirect_uri}"
-            f"&scope={scope}"
-            f"&state={state}"
-        )
+        if not client_id or not client_secret or not redirect_uri:
+            print("ERROR: Missing Cronofy environment variables")
+            return None
+        
+        # Add state parameter to track the user
+        state = f"discord_{discord_id}"
+        
+        # Build the query parameters
+        params = {
+            'client_id': client_id,
+            'response_type': 'code',
+            'redirect_uri': redirect_uri,
+            'scope': 'read_events read_free_busy create_event delete_event',
+            'state': state
+        }
+        
+        # Encode the parameters properly
+        query_string = urllib.parse.urlencode(params)
+        
+        # Use the proper authorization endpoint
+        auth_url = f"https://app.cronofy.com/oauth/authorize?{query_string}"
+        
+        print(f"Generated auth URL: {auth_url}")
         
         return auth_url
         
@@ -266,14 +282,21 @@ class MistralAgent:
             return 500, str(e)
 
     def shorten_url(self, url):
-        if HAS_SHORTENER:
-            try:
-                s = pyshorteners.Shortener()
-                return s.tinyurl.short(url)
-            except Exception as e:
-                print(f"URL shortening failed: {e}")
+        """Safely shorten a URL or return the original if shortening fails"""
+        try:
+            if HAS_SHORTENER:
+                try:
+                    s = pyshorteners.Shortener()
+                    shortened = s.tinyurl.short(url)
+                    print(f"Successfully shortened URL: {shortened}")
+                    return shortened
+                except Exception as e:
+                    print(f"URL shortening failed: {e}")
+                    return url
+            else:
                 return url
-        else:
+        except Exception as e:
+            print(f"Unexpected error in URL shortening: {e}")
             return url
 
     async def close(self):
@@ -283,13 +306,15 @@ class MistralAgent:
             self.session = None
             print("Closed aiohttp session")
 
-    async def call_mistral_api(self, prompt, max_tokens=500, temperature=0.7):
+    async def call_mistral_api(self, prompt, max_tokens=500, temperature=0.7, timeout=30):
         """Call Mistral API with a prompt and return the generated text"""
         mistral_api_key = os.getenv("MISTRAL_API_KEY")
         if not mistral_api_key:
+            print("ERROR: Mistral API key not found in environment variables.")
             return "Mistral API key not found in environment variables."
         
         try:
+            print(f"Calling Mistral API with prompt of {len(prompt)} characters")
             url = "https://api.mistral.ai/v1/chat/completions"
             headers = {
                 "Content-Type": "application/json",
@@ -305,15 +330,45 @@ class MistralAgent:
                 "temperature": temperature
             }
             
+            print(f"Request payload: {json.dumps(payload)[:200]}...")
+            
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as response:
-                    if response.status == 200:
+                # Add timeout to the request
+                async with session.post(url, headers=headers, json=payload, timeout=timeout) as response:
+                    status_code = response.status
+                    print(f"Mistral API response status: {status_code}")
+                    
+                    if status_code == 200:
                         data = await response.json()
-                        return data["choices"][0]["message"]["content"]
+                        content = data["choices"][0]["message"]["content"]
+                        print(f"Received content of length: {len(content)}")
+                        return content
                     else:
                         error_text = await response.text()
-                        print(f"Mistral API error: {response.status} - {error_text}")
-                        return f"API error: {response.status}"
+                        print(f"Mistral API error: {status_code} - {error_text}")
+                        return f"API error: {status_code} - {error_text[:100]}"
+        except asyncio.TimeoutError:
+            print("Mistral API request timed out after 30 seconds")
+            return "ERROR: The AI service timed out. Please try again."
         except Exception as e:
             print(f"Exception calling Mistral API: {e}")
+            import traceback
+            traceback.print_exc()
             return f"Error: {str(e)}"
+
+    def get_cronofy_auth_url(self, discord_user_id):
+        """Generate a Cronofy authorization URL for a user"""
+        # Remove 'availability' from the scope - it's not a valid standalone scope
+        scope = "read_events read_free_busy"
+        state = str(discord_user_id)  # Use Discord user ID as state parameter
+        
+        auth_url = (
+            f"https://app.cronofy.com/oauth/authorize"
+            f"?client_id={self.cronofy_client_id}"
+            f"&response_type=code"
+            f"&redirect_uri={self.cronofy_redirect_uri}"
+            f"&scope={scope}"
+            f"&state={state}"
+        )
+        
+        return auth_url

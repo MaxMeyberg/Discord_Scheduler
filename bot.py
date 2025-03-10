@@ -1,39 +1,28 @@
 import os
 import discord
 import logging
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from agent import MistralAgent
 from datetime import datetime, timedelta
 import json
-import asyncio
 import pytz
-import aiohttp
+import copy
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('discord')
 
-# Load environment variables
+# Load environment variables and setup bot
 load_dotenv()
-
-# Bot configuration
 PREFIX = "!"
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
-
-# Initialize agent
 agent = MistralAgent(bot)
-
-# Remove default help command
 bot.remove_command('help')
 
 # Admin users list
-ADMIN_USERS = [
-    "maxmeyberg",  
-    "maxtonian",
-    "itsalbertom", 
-]
+ADMIN_USERS = ["maxmeyberg", "maxtonian", "itsalbertom"]
 
 # Simplified admin check function
 def is_admin(member):
@@ -44,168 +33,115 @@ def is_admin(member):
     )
     return is_admin_user
 
+# Store processed message IDs
+PROCESSED_MESSAGES = set()
+
 @bot.event
 async def on_ready():
     """Called when the bot is ready"""
     logger.info(f"{bot.user} has connected to Discord!")
     print(f"Logged in as {bot.user}")
-    print(f"Bot is ready with prefix: {PREFIX}")
-    print(f"No cogs loaded - all commands are directly in bot.py")
     
     # Set up the agent's session
     await agent.setup_session()
+    
+    # Start the cleanup task
+    cleanup_processed_messages.start()
 
 @bot.event
 async def on_message(message):
-    """Process incoming messages"""
-    # First process commands normally (to handle standard commands)
-    await bot.process_commands(message)
-    
-    # If the message doesn't mention the bot or is from the bot, ignore it
-    if bot.user not in message.mentions or message.author == bot.user:
+    """Process messages and catch mentions"""
+    # Skip messages from the bot itself
+    if message.author == bot.user:
+        return
+        
+    # Special handling for DMs - process registration callbacks
+    if message.guild is None:
+        print(f"Processing DM: '{message.content}'")
+        
+        # Check if this is an OAuth callback URL
+        if "code=" in message.content and ("postman" in message.content.lower() or "callback" in message.content.lower()):
+            print("Detected OAuth callback URL in DM")
+            
+            # Extract the auth code
+            try:
+                code_start = message.content.find("code=") + 5
+                code_end = message.content.find("&", code_start)
+                
+                if code_end == -1:  # No & after code
+                    auth_code = message.content[code_start:]
+                else:
+                    auth_code = message.content[code_start:code_end]
+                
+                # Process the auth code
+                success = await agent.process_auth_code(message.author, auth_code)
+                
+                if success:
+                    await message.channel.send("✅ Successfully connected your calendar! You can now use Skedge's scheduling features.")
+                else:
+                    await message.channel.send("❌ There was a problem connecting your calendar. Please try `!register` again or contact support.")
+                return
+            except Exception as e:
+                await message.channel.send(f"❌ Error processing registration: {str(e)}")
+                return
+        
+        # For other DMs, just process as normal commands
+        await bot.process_commands(message)
+        return
+        
+    # Prevent recursive processing
+    if message.id in PROCESSED_MESSAGES:
+        await bot.process_commands(message)
         return
     
-    # Get user data to check if registered
-    user_data = await agent.db.get_user(str(message.author.id))
-    if not user_data or not user_data.get("access_token"):
-        await message.channel.send(f"❌ {message.author.mention}, you need to connect your calendar first using `!register`")
+    # Check if the bot is mentioned
+    is_mentioned = False
+    mention_string = f"<@{bot.user.id}>"
+    if mention_string in message.content or bot.user in message.mentions:
+        is_mentioned = True
+    
+    # If not mentioned, just process commands
+    if not is_mentioned:
+        await bot.process_commands(message)
         return
-    
-    # Remove the bot mention from the message content
-    query = message.content.replace(f"<@{bot.user.id}>", "").strip()
-    if not query:
-        # If no actual query was provided, show options
-        await message.channel.send(f"👋 Hi {message.author.mention}! You can ask me about your calendar or scheduling. Try:\n"
-                                  "• When am I free tomorrow?\n"
-                                  "• Find a time to meet with @user\n"
-                                  "• Show me my calendar for this week")
-        return
-    
-    # Loading message
-    loading_msg = await message.channel.send("🤔 Analyzing your request...")
-    
-    # Get calendar context for AI
-    now = datetime.now()
-    past_date = now - timedelta(days=1)
-    future_date = now + timedelta(days=5)
-    
-    from_str = past_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    to_str = future_date.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
-    # Get user's events for context
-    status, response_text = await agent.cronofy_api_call(
-        endpoint="v1/events",
-        auth_token=user_data.get("access_token"),
-        params={
-            "tzid": "UTC",
-            "from": from_str,
-            "to": to_str,
-            "include_managed": "true"
-        }
-    )
-    
-    events_context = ""
-    if status == 200:
-        response_data = json.loads(response_text)
-        events = response_data.get("events", [])
         
-        # Format events as context (up to 5 events)
-        if events:
-            events_list = []
-            for event in events[:5]:
-                start = event.get("start", "Unknown")
-                end = event.get("end", "Unknown")
-                summary = event.get("summary", "Meeting")
-                events_list.append(f"- {summary}: {start} to {end}")
-            
-            events_context = "Your upcoming events:\n" + "\n".join(events_list)
+    # Process the mention
+    content = message.content.lower().replace(f"<@{bot.user.id}>", "").strip()
+    print(f"Processing mention: '{content}'")
     
-    # Check if any users are mentioned
-    mentioned_users = []
-    for user in message.mentions:
-        if user != bot.user:  # Skip the bot mention
-            mentioned_users.append(user.display_name)
-            
-    # Build prompt for Mistral AI
-    prompt = f"""You are Skedge, a Discord calendar assistant. Analyze this request and determine the best command to run.
-
-USER: {message.author.display_name}
-REQUEST: {query}
-MENTIONED USERS: {', '.join(mentioned_users) if mentioned_users else 'None'}
-CURRENT TIME: {now.strftime('%A, %B %d, %Y at %I:%M %p')}
-
-{events_context}
-
-These are the commands available in Skedge:
-1. !viewcal - Shows a user's calendar for the week
-2. !freetime - Shows when a user is available (6AM-9PM)
-3. !findtime @user - Finds overlapping free time between users
-4. !register - Connects Google Calendar to Skedge
-5. !help - Shows available commands
-
-Based on the user's request, determine:
-1. Which command would best answer their request
-2. What parameters should be included
-3. A brief explanation of why this is the right command
-
-Return your response in this JSON format:
-{{"command": "command_name", "parameters": "parameters", "explanation": "why this command"}}
-
-For example:
-{{"command": "findtime", "parameters": "@user duration=30", "explanation": "This will find 30-minute slots when both you and the mentioned user are free."}}
-
-If the request doesn't map to a specific command, use "none" as the command and explain how you can help.
-"""
+    # Extract mentions (except the bot)
+    mentioned_users = [user for user in message.mentions if user.id != bot.user.id]
     
-    # Call Mistral API
-    ai_response = await agent.call_mistral_api(prompt, max_tokens=500, temperature=0.3)
-    
-    try:
-        # Parse the JSON response
-        response_data = json.loads(ai_response)
-        command = response_data.get("command", "none")
-        parameters = response_data.get("parameters", "")
-        explanation = response_data.get("explanation", "")
+    # Find time command handling
+    if "free" in content and ("when" in content or "time" in content) and mentioned_users:
+        await message.channel.send(f"🔍 Looking for common free time...")
         
-        # Create a nice embed for the response
-        embed = discord.Embed(
-            title="📅 Skedge Assistant",
-            description=explanation,
-            color=discord.Color.purple()
-        )
+        # Create a command message
+        fake_message = copy.copy(message)
+        mention_text = " ".join([user.mention for user in mentioned_users if user.id != bot.user.id])
         
-        # If there's a specific command recommendation
-        if command != "none":
-            full_command = f"!{command} {parameters}".strip()
-            embed.add_field(
-                name="Suggested Command",
-                value=f"`{full_command}`",
-                inline=False
-            )
-            
-            # Add a shortcut button (this will be a clickable link that puts the command in chat)
-            embed.add_field(
-                name="Quick Action",
-                value=f"Type `{full_command}` or ask me to run it for you.",
-                inline=False
-            )
+        if not mention_text:
+            await message.channel.send("❌ Please mention at least one other user to find common free time.")
+            return
         
-        embed.set_footer(text="Powered by Mistral AI")
+        fake_message.content = f"!findtime {mention_text}"
+        PROCESSED_MESSAGES.add(fake_message.id)
         
-        # Delete loading message and send response
-        await loading_msg.delete()
-        await message.channel.send(embed=embed)
-        
-    except json.JSONDecodeError:
-        # If AI response isn't valid JSON, send a fallback response
-        await loading_msg.delete()
-        embed = discord.Embed(
-            title="📅 Skedge Assistant",
-            description=f"I'm not sure how to help with that. Try using `!help` to see available commands.",
-            color=discord.Color.purple()
-        )
-        await message.channel.send(embed=embed)
-        print(f"Invalid AI response: {ai_response}")
+        # Execute the command
+        ctx = await bot.get_context(fake_message)
+        if ctx.valid:
+            await bot.process_commands(fake_message)
+        else:
+            await message.channel.send(f"❌ I couldn't run the findtime command. Try using `!findtime @user` directly.")
+    else:
+        await message.channel.send(f"I'm not sure what you're asking. For finding meeting times, try: '@Schedge when are @user and I free?'")
+
+@tasks.loop(minutes=10)
+async def cleanup_processed_messages():
+    """Clear the processed messages set periodically"""
+    global PROCESSED_MESSAGES
+    print(f"Cleaning up {len(PROCESSED_MESSAGES)} processed messages")
+    PROCESSED_MESSAGES.clear()
 
 @bot.command(name="help")
 async def help_command(ctx):
@@ -807,22 +743,45 @@ async def get_user_free_periods(user_id, access_token, start_date, end_date, day
 
 # Now let's update the find_time command to use this function
 @bot.command(name="findtime", aliases=["schedule", "meet"])
-async def find_time(ctx, *, participants_and_options=None):
-    """Find overlapping free time between users
+async def find_time(ctx, *args):
+    """Find common free time between multiple users"""
+    # Parse arguments
+    min_duration = 30  # Default: 30 minute slots
+    days_ahead = 3     # Default: Look ahead 3 days
     
-    Usage: !findtime @user1 @user2 [options]
-    Options (optional):
-      duration=30 (in minutes)
-      days=3 (how many days ahead to look)
-    """
-    # Parse command arguments
-    if not participants_and_options:
-        await ctx.send("❌ Please mention at least one other user to find meeting times with.")
-        return
-    
-    # Parse mentions and any options
+    # Extract parameters
     mentions = ctx.message.mentions
-    participants = [ctx.author] + mentions  # Include command author
+    participants = []
+    
+    # Go through args to find mentions and parameters
+    for arg in args:
+        # Check for duration parameter
+        if arg.startswith("duration="):
+            try:
+                min_duration = int(arg.split("=")[1])
+            except ValueError:
+                await ctx.send("❌ Invalid duration format. Use `duration=30` for 30 minutes.")
+                return
+            
+        # Check for days parameter
+        elif arg.startswith("days="):
+            try:
+                days_ahead = int(arg.split("=")[1])
+                if days_ahead > 14:
+                    await ctx.send("❌ Maximum days ahead is 14.")
+                    return
+            except ValueError:
+                await ctx.send("❌ Invalid days format. Use `days=7` for 7 days.")
+                return
+    
+    # Include the message author by default
+    participants.append(ctx.author)
+    
+    # Add mentioned users, filtering out the bot
+    for user in mentions:
+        if user.id != bot.user.id:  # Skip the bot itself
+            if user not in participants:  # Avoid duplicates
+                participants.append(user)
     
     # Make sure we have at least 2 participants
     if len(participants) < 2:
@@ -878,24 +837,6 @@ async def find_time(ctx, *, participants_and_options=None):
             await ctx.send(f"❌ These users need to connect their calendars: {users_list}")
         await loading_msg.delete()
         return
-    
-    # Parse options
-    min_duration = 30  # Default 30 minute meetings
-    days_ahead = 3  # Default look 3 days ahead
-    
-    if participants_and_options:
-        options_text = participants_and_options.split(" ")
-        for option in options_text:
-            if "duration=" in option:
-                try:
-                    min_duration = int(option.split("=")[1])
-                except:
-                    pass
-            if "days=" in option:
-                try:
-                    days_ahead = int(option.split("=")[1])
-                except:
-                    pass
     
     # Set start and end dates for the search period
     now = datetime.now(pytz.timezone("America/Los_Angeles"))
