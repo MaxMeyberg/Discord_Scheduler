@@ -211,3 +211,37 @@ Run `python test_supabase.py` to check database connection
 ## License
 
 [MIT License](LICENSE)
+
+## Security Notice
+
+This repository does not contain any API keys, tokens, or secrets. You will need to provide your own credentials in a `.env` file (see [Setup](#setup) below).
+
+**NEVER commit your `.env` file to GitHub or share your API keys publicly.**
+
+## Obtaining Your Own API Keys
+
+To run this bot, you'll need to obtain these API keys:
+
+### Discord Bot Token
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Create a new application
+3. Go to the "Bot" tab and click "Add Bot"
+4. Copy the token
+
+### Mistral API Key
+1. Go to [Mistral AI Console](https://console.mistral.ai)
+2. Sign up for an account
+3. Navigate to API Keys section
+4. Create a new key
+
+### Cronofy API Credentials
+1. Go to [Cronofy Developer Portal](https://app.cronofy.com/developers)
+2. Create a new application
+3. Set redirect URI to `https://oauth.pstmn.io/v1/callback`
+4. Copy Client ID and Client Secret
+
+### Supabase Database
+1. Go to [Supabase](https://supabase.com/)
+2. Create a new project
+3. Create a "users" table with the structure described in the setup guide
+4. Copy your URL and service_role key

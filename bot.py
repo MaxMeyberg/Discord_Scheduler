@@ -44,8 +44,8 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 agent = MistralAgent(bot)
 bot.remove_command('help')
 
-# Admin users list
-ADMIN_USERS = ["maxmeyberg", "maxtonian", "itsalbertom"]
+# Admin users list - CHANGE THIS before public release
+ADMIN_USERS = ["your_discord_username"]  # Replace with generic placeholder
 
 # Simplified admin check function
 def is_admin(member):

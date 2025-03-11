@@ -1,10 +1,10 @@
 #!/bin/bash
-# AWS setup script for Schedge
+# Setup script for Schedge
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Create systemd service file
+# Create systemd service file (for Linux users)
 cat > /tmp/schedge.service << EOL
 [Unit]
 Description=Schedge Discord Bot
@@ -21,12 +21,22 @@ RestartSec=10
 WantedBy=multi-user.target
 EOL
 
-# Set up the service (requires sudo)
-echo "Run these commands with sudo to install the service:"
-echo "sudo cp /tmp/schedge.service /etc/systemd/system/"
-echo "sudo systemctl daemon-reload"
-echo "sudo systemctl enable schedge"
-echo "sudo systemctl start schedge"
+# Instructions for deploying as a service
+echo "
+DEPLOYMENT OPTIONS:
+--------------------------
+1. For Linux systemd service:
+   sudo cp /tmp/schedge.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable schedge
+   sudo systemctl start schedge
+
+2. For AWS deployment:
+   See the AWS deployment guide in the documentation.
+
+3. For manual running:
+   python bot.py
+"
 
 # Instructions for setting up AWS Parameter Store
 echo "
