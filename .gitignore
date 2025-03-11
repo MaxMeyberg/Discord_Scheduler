@@ -33,4 +33,4 @@ wheels/
 .venv
 
 # Secrets
-.env
+.envschedge.zip
